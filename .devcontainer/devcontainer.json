@@ -1,13 +1,20 @@
 {
   "name": "LaMa Dev Container",
+
   "build": {
     "dockerfile": "Dockerfile"
   },
+
   "workspaceFolder": "/workspaces/lama",
-  "postCreateCommand": "chmod +x /workspaces/lama/setup.sh && /workspaces/lama/setup.sh",
-  "extensions": [
-    "ms-python.python",
-    "ms-python.vscode-pylance"
-  ],
-  "remoteUser": "vscode"
+
+  "postCreateCommand": "chmod +x /workspaces/lama/setup.sh && bash /workspaces/lama/setup.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ]
+    }
+  }
 }
