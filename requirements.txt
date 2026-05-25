@@ -1,6 +1,7 @@
+# Core dependencies
 pyyaml
 tqdm
-numpy
+numpy<2.0.0
 easydict==1.9.0
 scikit-image==0.17.2
 scikit-learn==0.24.2
@@ -10,11 +11,26 @@ joblib
 matplotlib
 pandas
 albumentations==0.5.2
-hydra-core==1.1.0
-pytorch-lightning==1.2.9
 tabulate
 kornia==0.5.0
 webdataset
 packaging
-scikit-learn==0.24.2
+scikit-learn
 wldhx.yadisk-direct
+
+# Hydra & configs
+hydra-core==1.3.2
+omegaconf==2.3.0
+
+# PyTorch & Lightning
+torch>=2.0.0
+pytorch-lightning>=2.0.0
+torchvision
+
+# NetCDF support
+xarray
+netcdf4
+
+# Testing & development
+pytest>=7.0
+pytest-cov

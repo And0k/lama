@@ -1,0 +1,16 @@
+dataset:
+  _target_: datasets.netcdf_vertical.NetCDFVerticalSliceDataset
+  nc_path: /path/to/BALTICSEA_ANALYSISFORECAST_PHY_003_006.nc
+  var_names: ["temperature"]  # , "salinity"
+  slice_axis: "lon"
+  slice_indices: null
+  time_index: "all"
+  settings: ${settings}
+  transforms: null
+
+# Optional datamodule helper if you want to instantiate from config
+datamodule:
+  _target_: training.datamodule.NetCDFDataModule
+  dataset_cfg: ${dataset}
+  batch_size: 1
+  num_workers: 0

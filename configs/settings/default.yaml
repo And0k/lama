@@ -1,0 +1,14 @@
+CMEMS_START: "2020-01-01"
+CMEMS_END: "2020-12-31"
+CMEMS_LON_MIN: 9.0
+CMEMS_LON_MAX: 31.0
+CMEMS_LAT_MIN: 53.0
+CMEMS_LAT_MAX: 66.0
+CMEMS_BAL_PHY_LONS: [9.0, 10.0, 11.0]
+CMEMS_BAL_PHY_LATS: [53.0, 54.0, 55.0]
+CMEMS_DEPTH_MIN: 0.0
+CMEMS_DEPTH_MAX: 200.0
+NETCDF_MAX_ABSENT_PCT: 20.0
+
+# Additional optional settings may be defined as needed by datasets/netcdf_vertical
+TRANSFORMS: null

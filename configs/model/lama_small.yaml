@@ -1,0 +1,5 @@
+_target_: models.factory.build_model
+generator:
+	in_channels: 1   # will be overwritten dynamically after dataset instantiation
+discriminator:
+	in_channels: 1
