@@ -1,0 +1,5 @@
+- dataset.filepaths=["/tmp/test_predict.nc"]
+- checkpoint=/mnt/b/Downloads/LaMa_models/big-lama/models/best.ckpt
+- out_dir=/tmp/inference_out
+- batch_size=1
+- max_samples=2

@@ -1,0 +1,10 @@
+_target_: models.factory.build_model
+in_channels: 3
+num_classes: 3
+generator_cfg:
+  _target_: saicinpainting.training.modules.ffc.FFCResNetGenerator
+  input_nc: ${in_channels}
+  output_nc: ${num_classes}
+  ngf: 64
+  n_downsampling: 3
+  n_blocks: 9

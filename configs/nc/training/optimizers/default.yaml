@@ -1,0 +1,14 @@
+# @package _group_
+# Optimizer settings for NetCDF pipeline
+
+optimizers:
+  generator:
+    lr: 0.0001
+    betas: [0.0, 0.999]
+    eps: 0.00000001
+    weight_decay: 0
+  discriminator:
+    lr: 0.0001
+    betas: [0.0, 0.999]
+    eps: 0.00000001
+    weight_decay: 0

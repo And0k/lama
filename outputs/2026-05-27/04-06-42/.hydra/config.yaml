@@ -1,0 +1,20 @@
+dataset:
+  filepaths:
+  - /tmp/test_predict.nc
+  variables:
+  - thetao
+  scaling:
+    thetao:
+    - -3.0
+    - 40.0
+  time_indices: 0
+  depth_indices: null
+  lat_indices: null
+  lon_indices: null
+  slice_mode: time_depth
+checkpoint: /mnt/b/Downloads/LaMa_models/big-lama/models/best.ckpt
+out_dir: /tmp/inference_out
+device: cpu
+batch_size: 1
+num_workers: 0
+max_samples: 2

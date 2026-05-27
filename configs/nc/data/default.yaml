@@ -1,0 +1,40 @@
+# @package _group_
+# NetCDF dataset configuration for oceanographic field inpainting
+# Each sample = full 2D lat×lon field at a single time step, one channel per variable.
+
+batch_size: 4
+val_batch_size: 2
+num_workers: 0  # Use 0 for netCDF3 files; >0 requires netCDF4 format
+
+dataset:
+  _target_: netcdf.data.dataset.NetCDFDataset
+  filepaths: []  # Override with your NetCDF file paths (e.g., /path/to/file.nc)
+  variables: ["thetao", "so", "uo"]  # Channels: Temperature, Salinity, Zonal velocity
+  scaling:  # Physical ranges for [0,1] normalisation (vmin, vmax)
+    thetao: [-3.0, 40.0]
+    so: [0.0, 40.0]
+    uo: [-2.0, 2.0]
+    vo: [-2.0, 2.0]
+    wo: [-0.5, 0.5]
+    bottomT: [-3.0, 40.0]
+    sob: [0.0, 40.0]
+  time_indices: null   # Use all available time steps (or: 0, [0,1,2], slice(0,10))
+  depth_indices: null  # Use all available depth levels (or: 0, [0,1,2], slice(0,10))
+  lat_indices: null    # Use for time_lat mode; select specific latitude index
+  lon_indices: null    # Use for time_lon mode; select specific longitude index
+  slice_mode: null     # Slicing mode: null (default lat×lon), ["time", "depth"], ["time", "latitude"], ["time", "longitude"]
+  mask_variable: null  # For inference with pre-existing mask variable
+  mask_generator:  # For training with random masks
+    _target_: saicinpainting.training.data.masks.MixedMaskGenerator
+    irregular_proba: 1.0
+    box_proba: 0.0
+    segm_proba: 0.0       # Disabled: requires detectron2
+    squares_proba: 0.0
+    superres_proba: 0.0
+    outpainting_proba: 0.0
+  coverage_threshold: 0.0
+
+dataloader_kwargs:
+  batch_size: ${nc.data.batch_size}
+  shuffle: true
+  num_workers: ${nc.data.num_workers}
