@@ -1,0 +1,50 @@
+run_title: "cmems_vertical_l1_l2_domain"
+
+training_model:
+  kind: default
+  visualize_each_iters: 500
+  concat_mask: true
+  store_discr_outputs_for_vis: true
+
+losses:
+  l1:
+    weight_missing: 1.0
+    weight_known: 10.0
+  l2:
+    weight_missing: 0.5
+    weight_known: 5.0
+  perceptual:
+    weight: 0
+  adversarial:
+    kind: r1
+    weight: 10
+    gp_coef: 0.001
+    mask_as_fake_target: true
+    allow_scale_mask: true
+  feature_matching:
+    weight: 100
+  resnet_pl:
+    weight: 0
+    weights_path: /tmp/torch_home
+  domain:
+    smoothness:
+      weight: 1.0
+    bounds:
+      weight: 0.5
+      bounds:
+        - [0.0, 1.0]
+        - [0.0, 1.0]
+        - [0.0, 1.0]
+    gradient:
+      weight: 0.1
+
+defaults:
+  - location: docker
+  - /data: cmems_vertical
+  - generator: ffc_resnet_075
+  - discriminator: pix2pixhd_nlayer
+  - optimizers: optimizer_nc
+  - visualizer: directory
+  - evaluator: default_inpainted
+  - trainer: pl26_compat
+  - hydra: overrides

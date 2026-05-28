@@ -6,7 +6,7 @@ from omegaconf import OmegaConf
 
 from saicinpainting.training.data.datasets import make_constant_area_crop_params
 from saicinpainting.training.losses.distance_weighting import make_mask_distance_weighter
-from saicinpainting.training.losses.feature_matching import feature_matching_loss, masked_l1_loss
+from saicinpainting.training.losses.feature_matching import feature_matching_loss, masked_l1_loss, masked_l2_loss
 from saicinpainting.training.modules.fake_fakes import FakeFakesGenerator
 from saicinpainting.training.trainers.base import BaseInpaintingTrainingModule, make_multiscale_noise
 from saicinpainting.utils import add_prefix_to_keys, get_ramp
@@ -67,7 +67,14 @@ class DefaultInpaintingTrainingModule(BaseInpaintingTrainingModule):
         if self.concat_mask:
             masked_img = torch.cat([masked_img, mask], dim=1)
 
+        orig_h, orig_w = masked_img.shape[2], masked_img.shape[3]
+        pad_h = (8 - orig_h % 8) % 8
+        pad_w = (8 - orig_w % 8) % 8
+        if pad_h > 0 or pad_w > 0:
+            masked_img = F.pad(masked_img, (0, pad_w, 0, pad_h), mode='reflect')
         batch['predicted_image'] = self.generator(masked_img)
+        if pad_h > 0 or pad_w > 0:
+            batch['predicted_image'] = batch['predicted_image'][:, :, :orig_h, :orig_w]
         batch['inpainted'] = mask * batch['predicted_image'] + (1 - mask) * batch['image']
 
         if self.fake_fakes_proba > 1e-3:
@@ -98,6 +105,15 @@ class DefaultInpaintingTrainingModule(BaseInpaintingTrainingModule):
 
         total_loss = l1_value
         metrics = dict(gen_l1=l1_value)
+
+        # L2 (optional)
+        l2_cfg = self.config.losses.get("l2", {})
+        if l2_cfg.get("weight_known", 0) > 0:
+            l2_value = masked_l2_loss(predicted_img, img, supervised_mask,
+                                      l2_cfg.weight_known,
+                                      l2_cfg.get("weight_missing", 0))
+            total_loss = total_loss + l2_value
+            metrics['gen_l2'] = l2_value
 
         # vgg-based perceptual loss
         if self.config.losses.perceptual.weight > 0:
@@ -134,6 +150,27 @@ class DefaultInpaintingTrainingModule(BaseInpaintingTrainingModule):
             resnet_pl_value = self.loss_resnet_pl(predicted_img, img)
             total_loss = total_loss + resnet_pl_value
             metrics['gen_resnet_pl'] = resnet_pl_value
+
+        # Domain-specific losses
+        domain_cfg = self.config.losses.get("domain", {})
+        if "smoothness" in self.domain_losses:
+            dl = self.domain_losses["smoothness"]
+            sm_val = dl["fn"](predicted_img, mask=original_mask) * dl["weight"]
+            total_loss = total_loss + sm_val
+            metrics['gen_smooth'] = sm_val
+
+        if "bounds" in self.domain_losses:
+            dl = self.domain_losses["bounds"]
+            bounds = OmegaConf.to_container(domain_cfg.bounds.bounds)
+            bd_val = dl["fn"](predicted_img, bounds, mask=original_mask) * dl["weight"]
+            total_loss = total_loss + bd_val
+            metrics['gen_bounds'] = bd_val
+
+        if "gradient" in self.domain_losses:
+            dl = self.domain_losses["gradient"]
+            gr_val = dl["fn"](predicted_img, target=img, mask=original_mask) * dl["weight"]
+            total_loss = total_loss + gr_val
+            metrics['gen_grad'] = gr_val
 
         return total_loss, metrics
 

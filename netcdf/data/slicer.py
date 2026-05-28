@@ -1,6 +1,10 @@
+import logging
+
 import numpy as np
 from typing import Tuple, List, Dict, Union, Optional, Sequence
 import xarray as xr
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_indices(value):
@@ -10,6 +14,9 @@ def resolve_indices(value):
       - None, int, slice, list → passed through
       - dict with ``_type_: "slice"`` → ``slice(start, stop, step)``
       - dict with ``_type_: "list"`` → list of ints
+
+    String-based slice expressions (e.g. ``"slice(141, 365)"``) are NOT
+    supported — use OmegaConf resolvers (``${slice:141,365}``) instead.
     """
     if value is None or isinstance(value, (int, slice, list)):
         return value
@@ -19,6 +26,8 @@ def resolve_indices(value):
             return slice(value.get("start"), value.get("stop"), value.get("step"))
         if t == "list":
             return list(value.get("values", []))
+    if isinstance(value, str):
+        logger.warning("Unexpected string index spec %r — use ${slice:...} resolver instead", value)
     return value
 
 

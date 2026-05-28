@@ -1,0 +1,20 @@
+# @package _group_
+# PyTorch Lightning 2.6 compatible trainer config
+kwargs:
+  devices: auto
+  accelerator: auto
+  strategy: auto
+  max_epochs: 40
+  limit_train_batches: 25000
+  val_check_interval: 25000
+  log_every_n_steps: 250
+  precision: 32
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 8
+
+checkpoint_kwargs:
+  verbose: True
+  save_top_k: 5
+  save_last: True
+  monitor: val_ssim_fid100_f1_total_mean
+  mode: max

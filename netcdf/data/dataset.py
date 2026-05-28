@@ -257,9 +257,22 @@ class NetCDFDataset(Dataset):
         dim_summary = ", ".join(
             f"{axis}={len(per_dim_counts[axis])}" for axis in effective_mode
         )
+        bounds_parts = []
+        for axis in effective_mode:
+            idxs = per_dim_counts[axis]
+            if not idxs:
+                continue
+            lo, hi = min(idxs), max(idxs)
+            coord_name = axis
+            if coord_name in ds.coords:
+                vals = ds[coord_name].values
+                bounds_parts.append(f"{axis}[{lo}]={vals[lo]}..{axis}[{hi}]={vals[hi]}")
+            else:
+                bounds_parts.append(f"{axis}[{lo}]..{axis}[{hi}]")
+        bounds_str = ", ".join(bounds_parts)
         logger.info(
-            "Prefiltered %d/%d samples (%s) threshold=%.2f",
-            len(valid), total_count, dim_summary, self.fill_ratio_threshold,
+            "Prefiltered %d/%d samples (%s) threshold=%.2f | %s",
+            len(valid), total_count, dim_summary, self.fill_ratio_threshold, bounds_str,
         )
         return valid
 
@@ -366,6 +379,12 @@ class NetCDFDataset(Dataset):
         sel_kw = {dim: idx for dim, idx in fixed_indices.items() if dim in ds.dims}
         selection = ds.isel(sel_kw) if sel_kw else ds
 
+        if self.lat_indices is not None and "latitude" not in fixed_indices:
+            selection = selection.isel(latitude=self.lat_indices)
+
+        if self.lon_indices is not None and "longitude" not in fixed_indices:
+            selection = selection.isel(longitude=self.lon_indices)
+
         result = self._extract_fields(
             filepath, selection, ds,
             time_index=fixed_indices.get("time", local_idx),
@@ -374,6 +393,8 @@ class NetCDFDataset(Dataset):
             lon_idx=fixed_indices.get("longitude", 0),
         )
         ds.close()
+        if self.transform:
+            result = self.transform(result)
         return result
 
     def _extract_fields(self, filepath, selection, ds, *, time_index, depth_idx, lat_idx, lon_idx):

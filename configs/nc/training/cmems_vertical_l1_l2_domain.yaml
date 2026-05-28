@@ -1,0 +1,54 @@
+# Training config for CMEMS NetCDF vertical slices
+# Uses vertical mask generation from demo_nc defaults
+
+run_title: "cmems_vertical_l1_l2_domain"
+
+training_model:
+  kind: default
+  visualize_each_iters: 500
+  concat_mask: true
+  store_discr_outputs_for_vis: true
+
+losses:
+  l1:
+    weight_missing: 1.0
+    weight_known: 10.0
+  l2:
+    weight_missing: 0.5
+    weight_known: 5.0
+  perceptual:
+    weight: 0          # Disabled: not useful for physical fields
+  adversarial:
+    kind: r1
+    weight: 10
+    gp_coef: 0.001
+    mask_as_fake_target: true
+    allow_scale_mask: true
+  feature_matching:
+    weight: 100
+  resnet_pl:
+    weight: 0          # Disabled: ResNet perceptual trained on natural images
+    weights_path: ${env:TORCH_HOME}
+  domain:
+    smoothness:
+      weight: 1.0
+    bounds:
+      weight: 0.5
+      bounds:          # Per-channel bounds in [0,1] scaled space
+        - [0.0, 1.0]   # |V| (velocity magnitude, always ≥0)
+        - [0.0, 1.0]   # thetao (temperature)
+        - [0.0, 1.0]   # so (salinity)
+    gradient:
+      weight: 0.1
+
+defaults:
+  - location: docker
+  - _self_
+  - data: /nc/data/cmems_vertical
+  - generator: /nc/training/generator/ffc_resnet_075
+  - discriminator: /nc/training/discriminator/pix2pixhd_nlayer
+  - optimizers: /nc/training/optimizers/default
+  - visualizer: directory
+  - evaluator: default_inpainted
+  - trainer: any_gpu_large_ssim_ddp_final
+  - hydra: overrides

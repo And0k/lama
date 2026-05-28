@@ -11,12 +11,26 @@ os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 import hydra
 from omegaconf import OmegaConf
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.plugins import DDPPlugin
+
+
+def _make_slice(*args):
+    args = [None if x == "None" else int(x) for x in args]
+    return slice(*args)
+
+
+def _make_indices(*args):
+    return [int(x) for x in args]
+
+
+OmegaConf.register_new_resolver("slice", _make_slice, replace=True)
+OmegaConf.register_new_resolver("indices", _make_indices, replace=True)
 
 from saicinpainting.training.trainers import make_training_model
 from saicinpainting.utils import register_debug_signal_handlers, handle_ddp_subprocess, handle_ddp_parent_process, \

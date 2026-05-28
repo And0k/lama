@@ -60,6 +60,7 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
                  average_generator_period=10, store_discr_outputs_for_vis=False,
                  **kwargs):
         super().__init__(*args, **kwargs)
+        self.automatic_optimization = False
         LOGGER.info('BaseInpaintingTrainingModule init called')
 
         self.config = config
@@ -68,7 +69,8 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
         self.use_ddp = use_ddp
 
         if not get_has_ddp_rank():
-            LOGGER.info(f'Generator\n{self.generator}')
+            n_params = sum(p.numel() for p in self.generator.parameters())
+            LOGGER.info('Generator: %s (%.1fM params)', self.generator.__class__.__name__, n_params / 1e6)
 
         if not predict_only:
             self.save_hyperparameters(self.config)
@@ -79,7 +81,8 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
             self.test_evaluator = make_evaluator(**self.config.evaluator)
 
             if not get_has_ddp_rank():
-                LOGGER.info(f'Discriminator\n{self.discriminator}')
+                n_params = sum(p.numel() for p in self.discriminator.parameters())
+                LOGGER.info('Discriminator: %s (%.1fM params)', self.discriminator.__class__.__name__, n_params / 1e6)
 
             extra_val = self.config.data.get('extra_val', ())
             if extra_val:
@@ -100,6 +103,9 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
             if self.config.losses.get("l1", {"weight_known": 0})['weight_known'] > 0:
                 self.loss_l1 = nn.L1Loss(reduction='none')
 
+            if self.config.losses.get("l2", {"weight_known": 0}).get('weight_known', 0) > 0:
+                self.loss_l2 = nn.MSELoss(reduction='none')
+
             if self.config.losses.get("mse", {"weight": 0})['weight'] > 0:
                 self.loss_mse = nn.MSELoss(reduction='none')
             
@@ -111,7 +117,29 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
             else:
                 self.loss_resnet_pl = None
 
+            domain_cfg = self.config.losses.get("domain", {})
+            self.domain_losses = {}
+            if domain_cfg.get("smoothness", {}).get("weight", 0) > 0:
+                from saicinpainting.training.losses.physical import smoothness_loss
+                self.domain_losses["smoothness"] = {
+                    "fn": smoothness_loss,
+                    "weight": domain_cfg.smoothness.weight,
+                }
+            if domain_cfg.get("bounds", {}).get("weight", 0) > 0:
+                from saicinpainting.training.losses.physical import physical_bounds_loss
+                self.domain_losses["bounds"] = {
+                    "fn": physical_bounds_loss,
+                    "weight": domain_cfg.bounds.weight,
+                }
+            if domain_cfg.get("gradient", {}).get("weight", 0) > 0:
+                from saicinpainting.training.losses.physical import gradient_consistency_loss
+                self.domain_losses["gradient"] = {
+                    "fn": gradient_consistency_loss,
+                    "weight": domain_cfg.gradient.weight,
+                }
+
         self.visualize_each_iters = visualize_each_iters
+        self._val_outputs = []
         LOGGER.info('BaseInpaintingTrainingModule init done')
 
     def configure_optimizers(self):
@@ -122,6 +150,13 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
         ]
 
     def train_dataloader(self):
+        nc_cfg = self.config.data.get('nc', {}).get('data', None)
+        if nc_cfg is not None and 'dataset' in nc_cfg:
+            from torch.utils.data import DataLoader
+            from hydra.utils import instantiate
+            ds = instantiate(nc_cfg.dataset)
+            return DataLoader(ds, batch_size=nc_cfg.get('batch_size', 2),
+                              shuffle=True, num_workers=nc_cfg.get('num_workers', 0))
         kwargs = dict(self.config.data.train)
         if self.use_ddp:
             kwargs['ddp_kwargs'] = dict(num_replicas=self.trainer.num_nodes * self.trainer.num_processes,
@@ -131,6 +166,13 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
         return dataloader
 
     def val_dataloader(self):
+        nc_cfg = self.config.data.get('nc', {}).get('data', None)
+        if nc_cfg is not None and 'dataset' in nc_cfg:
+            from torch.utils.data import DataLoader
+            from hydra.utils import instantiate
+            ds = instantiate(nc_cfg.dataset)
+            return [DataLoader(ds, batch_size=nc_cfg.get('val_batch_size', 1),
+                               shuffle=False, num_workers=nc_cfg.get('num_workers', 0))]
         res = [make_default_val_dataloader(**self.config.data.val)]
 
         if self.config.data.visual_test is not None:
@@ -144,11 +186,59 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
 
         return res
 
-    def training_step(self, batch, batch_idx, optimizer_idx=None):
+    def training_step(self, batch, batch_idx):
         self._is_training_step = True
-        return self._do_step(batch, batch_idx, mode='train', optimizer_idx=optimizer_idx)
+        opt_gen, opt_discr = self.optimizers()
 
-    def validation_step(self, batch, batch_idx, dataloader_idx):
+        # Generator step
+        set_requires_grad(self.generator, True)
+        set_requires_grad(self.discriminator, False)
+
+        # Forward pass (must be after set_requires_grad so generator output has grad)
+        batch = self(batch)
+
+        gen_loss, gen_metrics = self.generator_loss(batch)
+        self.manual_backward(gen_loss)
+        opt_gen.step()
+        opt_gen.zero_grad()
+
+        # Discriminator step
+        if self.config.losses.adversarial.weight > 0:
+            set_requires_grad(self.generator, False)
+            set_requires_grad(self.discriminator, True)
+            discr_loss, discr_metrics = self.discriminator_loss(batch)
+            self.manual_backward(discr_loss)
+            opt_discr.step()
+            opt_discr.zero_grad()
+        else:
+            discr_loss = torch.tensor(0.0)
+            discr_metrics = {}
+
+        # Visualization
+        metrics = {**gen_metrics, **discr_metrics}
+        if self.get_ddp_rank() in (None, 0) and batch_idx % self.visualize_each_iters == 0:
+            if self.config.losses.adversarial.weight > 0 and self.store_discr_outputs_for_vis:
+                with torch.no_grad():
+                    self.store_discr_outputs(batch)
+            self.visualizer(self.current_epoch, batch_idx, batch, suffix='_train')
+
+        metrics_prefix = 'train_'
+        log_info = add_prefix_to_keys(metrics, metrics_prefix)
+        self.log_dict(log_info, on_step=True, on_epoch=False)
+
+        # Generator averaging
+        if self.average_generator \
+                and self.global_step >= self.average_generator_start_step \
+                and self.global_step >= self.last_generator_averaging_step + self.average_generator_period:
+            if self.generator_average is None:
+                self.generator_average = copy.deepcopy(self.generator)
+            else:
+                update_running_average(self.generator_average, self.generator, decay=self.generator_avg_beta)
+            self.last_generator_averaging_step = self.global_step
+
+        return gen_loss
+
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
         extra_val_key = None
         if dataloader_idx == 0:
             mode = 'val'
@@ -158,27 +248,13 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
             mode = 'extra_val'
             extra_val_key = self.extra_val_titles[dataloader_idx - 2]
         self._is_training_step = False
-        return self._do_step(batch, batch_idx, mode=mode, extra_val_key=extra_val_key)
+        result = self._do_step(batch, batch_idx, mode=mode, extra_val_key=extra_val_key)
+        self._val_outputs.append(result)
+        return result
 
-    def training_step_end(self, batch_parts_outputs):
-        if self.training and self.average_generator \
-                and self.global_step >= self.average_generator_start_step \
-                and self.global_step >= self.last_generator_averaging_step + self.average_generator_period:
-            if self.generator_average is None:
-                self.generator_average = copy.deepcopy(self.generator)
-            else:
-                update_running_average(self.generator_average, self.generator, decay=self.generator_avg_beta)
-            self.last_generator_averaging_step = self.global_step
-
-        full_loss = (batch_parts_outputs['loss'].mean()
-                     if torch.is_tensor(batch_parts_outputs['loss'])  # loss is not tensor when no discriminator used
-                     else torch.tensor(batch_parts_outputs['loss']).float().requires_grad_(True))
-        log_info = {k: v.mean() for k, v in batch_parts_outputs['log_info'].items()}
-        self.log_dict(log_info, on_step=True, on_epoch=False)
-        return full_loss
-
-    def validation_epoch_end(self, outputs):
-        outputs = [step_out for out_group in outputs for step_out in out_group]
+    def on_validation_epoch_end(self):
+        outputs = self._val_outputs
+        self._val_outputs = []
         averaged_logs = average_dicts(step_out['log_info'] for step_out in outputs)
         self.log_dict({k: v.mean() for k, v in averaged_logs.items()})
 
@@ -187,32 +263,34 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
 
         # standard validation
         val_evaluator_states = [s['val_evaluator_state'] for s in outputs if 'val_evaluator_state' in s]
-        val_evaluator_res = self.val_evaluator.evaluation_end(states=val_evaluator_states)
-        val_evaluator_res_df = pd.DataFrame(val_evaluator_res).stack(1).unstack(0)
-        val_evaluator_res_df.dropna(axis=1, how='all', inplace=True)
-        LOGGER.info(f'Validation metrics after epoch #{self.current_epoch}, '
-                    f'total {self.global_step} iterations:\n{val_evaluator_res_df}')
-
-        for k, v in flatten_dict(val_evaluator_res).items():
-            self.log(f'val_{k}', v)
+        if val_evaluator_states:
+            val_evaluator_res = self.val_evaluator.evaluation_end(states=val_evaluator_states)
+            val_evaluator_res_df = pd.DataFrame(val_evaluator_res).stack(1).unstack(0)
+            val_evaluator_res_df.dropna(axis=1, how='all', inplace=True)
+            LOGGER.info(f'Validation metrics after epoch #{self.current_epoch}, '
+                        f'total {self.global_step} iterations:\n{val_evaluator_res_df}')
+            for k, v in flatten_dict(val_evaluator_res).items():
+                self.log(f'val_{k}', v)
 
         # standard visual test
         test_evaluator_states = [s['test_evaluator_state'] for s in outputs
                                  if 'test_evaluator_state' in s]
-        test_evaluator_res = self.test_evaluator.evaluation_end(states=test_evaluator_states)
-        test_evaluator_res_df = pd.DataFrame(test_evaluator_res).stack(1).unstack(0)
-        test_evaluator_res_df.dropna(axis=1, how='all', inplace=True)
-        LOGGER.info(f'Test metrics after epoch #{self.current_epoch}, '
-                    f'total {self.global_step} iterations:\n{test_evaluator_res_df}')
-
-        for k, v in flatten_dict(test_evaluator_res).items():
-            self.log(f'test_{k}', v)
+        if test_evaluator_states:
+            test_evaluator_res = self.test_evaluator.evaluation_end(states=test_evaluator_states)
+            test_evaluator_res_df = pd.DataFrame(test_evaluator_res).stack(1).unstack(0)
+            test_evaluator_res_df.dropna(axis=1, how='all', inplace=True)
+            LOGGER.info(f'Test metrics after epoch #{self.current_epoch}, '
+                        f'total {self.global_step} iterations:\n{test_evaluator_res_df}')
+            for k, v in flatten_dict(test_evaluator_res).items():
+                self.log(f'test_{k}', v)
 
         # extra validations
         if self.extra_evaluators:
             for cur_eval_title, cur_evaluator in self.extra_evaluators.items():
                 cur_state_key = f'extra_val_{cur_eval_title}_evaluator_state'
                 cur_states = [s[cur_state_key] for s in outputs if cur_state_key in s]
+                if not cur_states:
+                    continue
                 cur_evaluator_res = cur_evaluator.evaluation_end(states=cur_states)
                 cur_evaluator_res_df = pd.DataFrame(cur_evaluator_res).stack(1).unstack(0)
                 cur_evaluator_res_df.dropna(axis=1, how='all', inplace=True)
@@ -288,4 +366,7 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
         batch['discr_output_diff'] = batch['discr_output_real'] - batch['discr_output_fake']
 
     def get_ddp_rank(self):
-        return self.trainer.global_rank if (self.trainer.num_nodes * self.trainer.num_processes) > 1 else None
+        world_size = getattr(self.trainer, 'world_size', None)
+        if world_size is None:
+            world_size = getattr(self.trainer, 'num_processes', 1) * getattr(self.trainer, 'num_nodes', 1)
+        return self.trainer.global_rank if world_size > 1 else None
