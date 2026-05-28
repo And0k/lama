@@ -20,6 +20,7 @@ wldhx.yadisk-direct
 # Hydra & configs
 hydra-core==1.3.2
 omegaconf==2.3.0
+hydra-colorlog
 
 # PyTorch & Lightning
 torch>=2.0.0
