@@ -2,7 +2,7 @@
 NetCDF data utilities for oceanographic data loading and processing.
 """
 
-from .loader import load_netcdf, get_available_variables
+from .loader import load_netcdf, get_available_variables, read_units, resolve_output_channels
 from .dataset import NetCDFDataset
 from .vertical_masks import (
     vertical_random_lines_mask,
@@ -15,6 +15,8 @@ from ..visualization import visualize_sample, plot_comparison
 __all__ = [
     'load_netcdf',
     'get_available_variables',
+    'read_units',
+    'resolve_output_channels',
     'NetCDFDataset',
     'generate_mask',
     'vertical_random_lines_mask',

@@ -5,6 +5,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
@@ -260,6 +263,89 @@ class TestNetCDFDataset:
         assert _resolve_axis_count(shape, dims, "time", slice(0, 1)) == 1
         assert _resolve_axis_count(shape, dims, "latitude", [0, 1, 2]) == 3
 
+    def test_fill_ratio_threshold_no_filtering(self, tmp_path):
+        nc_path = tmp_path / "dummy_fr1.nc"
+        _make_dummy_nc(nc_path, [("thetao", np.float32)], shape=(2, 4, 8, 10))
+        ds = NetCDFDataset(
+            filepaths=[str(nc_path)],
+            variables=["thetao"],
+            scaling={"thetao": [-3.0, 40.0]},
+            fill_ratio_threshold=1.0,
+        )
+        assert len(ds) == 2
+
+    def test_fill_ratio_threshold_filters_heavily_masked(self, tmp_path):
+        if xr is None:
+            pytest.skip("xarray required")
+        nc_path = tmp_path / "dummy_fr2.nc"
+        ds_xr = xr.Dataset({}, coords={
+            "time": np.arange(3),
+            "depth": np.arange(4),
+            "latitude": np.arange(8),
+            "longitude": np.arange(10),
+        })
+        data = np.random.randn(3, 4, 8, 10).astype(np.float32)
+        data[0, :, :, :] = -999.0  # First time step fully masked
+        ds_xr["thetao"] = (("time", "depth", "latitude", "longitude"), data)
+        ds_xr["thetao"].attrs["_FillValue"] = -999.0
+        ds_xr.to_netcdf(nc_path, engine="netcdf4")
+
+        ds_full = NetCDFDataset(
+            filepaths=[str(nc_path)],
+            variables=["thetao"],
+            scaling={"thetao": [-3.0, 40.0]},
+            fill_ratio_threshold=1.0,
+        )
+        assert len(ds_full) == 3
+
+        ds_filtered = NetCDFDataset(
+            filepaths=[str(nc_path)],
+            variables=["thetao"],
+            scaling={"thetao": [-3.0, 40.0]},
+            fill_ratio_threshold=0.5,
+        )
+        assert len(ds_filtered) == 2
+
+    def test_fill_ratio_in_metadata(self, tmp_path):
+        nc_path = tmp_path / "dummy_fr3.nc"
+        _make_dummy_nc(nc_path, [("thetao", np.float32)], shape=(2, 4, 8, 10))
+        ds = NetCDFDataset(
+            filepaths=[str(nc_path)],
+            variables=["thetao"],
+            scaling={"thetao": [-3.0, 40.0]},
+            fill_ratio_threshold=1.0,
+        )
+        sample = ds[0]
+        assert "fill_ratio" in sample["meta"]
+        assert isinstance(sample["meta"]["fill_ratio"], float)
+
+    def test_fill_ratio_threshold_slice_mode(self, tmp_path):
+        if xr is None:
+            pytest.skip("xarray required")
+        nc_path = tmp_path / "dummy_fr4.nc"
+        ds_xr = xr.Dataset({}, coords={
+            "time": np.arange(2),
+            "depth": np.arange(4),
+            "latitude": np.arange(8),
+            "longitude": np.arange(10),
+        })
+        data = np.random.randn(2, 4, 8, 10).astype(np.float32)
+        data[0, 0, :, :] = -999.0  # First time+depth fully masked
+        ds_xr["thetao"] = (("time", "depth", "latitude", "longitude"), data)
+        ds_xr["thetao"].attrs["_FillValue"] = -999.0
+        ds_xr.to_netcdf(nc_path, engine="netcdf4")
+
+        ds = NetCDFDataset(
+            filepaths=[str(nc_path)],
+            variables=["thetao"],
+            scaling={"thetao": [-3.0, 40.0]},
+            slice_mode=["time", "depth"],
+            time_indices=slice(0, 2),
+            depth_indices=slice(0, 4),
+            fill_ratio_threshold=0.5,
+        )
+        assert len(ds) == 7  # 8 total - 1 filtered out
+
 
 class TestSliceNC:
 
@@ -290,13 +376,15 @@ class TestVisualization:
 
     def test_plot_slice(self):
         data = np.random.rand(16, 16)
-        ax = plot_slice(data)
-        assert ax is not None
+        fig, ax = plt.subplots()
+        plot_slice(data, ax)
+        plt.close(fig)
 
     def test_plot_mask(self):
         mask = np.random.randint(0, 2, (16, 16), dtype=np.uint8)
-        ax = plot_mask(mask)
-        assert ax is not None
+        fig, ax = plt.subplots()
+        plot_mask(mask, ax)
+        plt.close(fig)
 
     def test_plot_comparison(self):
         orig = np.random.rand(16, 16)
@@ -304,6 +392,45 @@ class TestVisualization:
         result = np.random.rand(16, 16)
         fig = plot_comparison(orig, masked, result)
         assert fig is not None
+        plt.close(fig)
+
+
+class TestVerticalMasks:
+
+    def test_vertical_random_lines_mask_shape(self):
+        from netcdf.data.vertical_masks import vertical_random_lines_mask
+        mask = vertical_random_lines_mask(width=40, height=32, n_lines=20, seed=42)
+        assert mask.shape == (32, 40)
+        assert mask.dtype == np.uint8
+
+    def test_vertical_random_lines_mask_values(self):
+        from netcdf.data.vertical_masks import vertical_random_lines_mask
+        mask = vertical_random_lines_mask(width=40, height=32, n_lines=20, seed=42)
+        unique = np.unique(mask)
+        assert set(unique).issubset({0, 255})
+
+    def test_add_model_points_shape(self):
+        from netcdf.data.vertical_masks import add_model_points
+        mask = np.ones((32, 40), dtype=np.uint8) * 255
+        result = add_model_points(mask, x_num=10, y_num=15, y_law="log")
+        assert result.shape == (32, 40)
+
+    def test_add_model_points_linear(self):
+        from netcdf.data.vertical_masks import add_model_points
+        mask = np.ones((32, 40), dtype=np.uint8) * 255
+        result = add_model_points(mask, x_num=5, y_num=5, y_law="linear")
+        assert result.shape == (32, 40)
+
+    def test_generate_vertical_mask(self):
+        from netcdf.data.vertical_masks import generate_vertical_mask
+        mask = generate_vertical_mask(shape=(32, 40), n_lines=10, x_num=15, y_num=20, y_law="log", seed=42)
+        assert mask.shape == (1, 32, 40)
+        assert mask.dtype == np.uint8
+
+    def test_vertical_mask_via_generate_mask(self):
+        mask = generate_mask((32, 40), {'type': 'vertical', 'n_lines': 10, 'seed': 42})
+        assert mask.shape == (1, 32, 40)
+        assert mask.dtype == np.uint8
 
 
 if __name__ == "__main__":

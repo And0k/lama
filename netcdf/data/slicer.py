@@ -3,6 +3,25 @@ from typing import Tuple, List, Dict, Union, Optional, Sequence
 import xarray as xr
 
 
+def resolve_indices(value):
+    """Convert OmegaConf-style index specs to Python objects.
+
+    Handles:
+      - None, int, slice, list → passed through
+      - dict with ``_type_: "slice"`` → ``slice(start, stop, step)``
+      - dict with ``_type_: "list"`` → list of ints
+    """
+    if value is None or isinstance(value, (int, slice, list)):
+        return value
+    if isinstance(value, dict) and "_type_" in value:
+        t = value["_type_"]
+        if t == "slice":
+            return slice(value.get("start"), value.get("stop"), value.get("step"))
+        if t == "list":
+            return list(value.get("values", []))
+    return value
+
+
 def slice_nc(arr4d: np.ndarray, axes: Tuple[str, str], idx: Tuple[int, int]) -> np.ndarray:
     """
     Universal slicing for 4D arrays with named axes.

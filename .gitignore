@@ -137,3 +137,5 @@ dmypy.json
 *.sw?
 .kilo/*
 LaMa_models
+outputs/*
+bin/outputs/*

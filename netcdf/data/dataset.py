@@ -21,7 +21,7 @@ from torch.utils.data import Dataset
 import xarray as xr
 
 from ..mask_generator import generate_mask
-from .slicer import _resolve_axis_count, compute_sample_count, subset_xarray
+from .slicer import _resolve_axis_count, compute_sample_count, resolve_indices, subset_xarray
 
 import logging
 
@@ -53,6 +53,7 @@ class NetCDFDataset(Dataset):
         mask_variable: Optional[str] = None,
         mask_generator: Optional[Dict] = None,
         coverage_threshold: float = 0.0,
+        fill_ratio_threshold: float = 1.0,
         transform: Optional[Callable] = None,
         slice_mode: Optional[Sequence[str]] = None,
         lat_coords: Optional[List[float]] = None,
@@ -63,13 +64,14 @@ class NetCDFDataset(Dataset):
         self.variables = variables
         self.scaling = scaling
         self.computed_variables = computed_variables or {}
-        self.time_indices = time_indices
-        self.depth_indices = depth_indices
-        self.lat_indices = lat_indices
-        self.lon_indices = lon_indices
+        self.time_indices = resolve_indices(time_indices)
+        self.depth_indices = resolve_indices(depth_indices)
+        self.lat_indices = resolve_indices(lat_indices)
+        self.lon_indices = resolve_indices(lon_indices)
         self.mask_variable = mask_variable
         self.mask_generator_params = mask_generator
         self.coverage_threshold = coverage_threshold
+        self.fill_ratio_threshold = fill_ratio_threshold
         self.transform = transform
         self.slice_mode = list(slice_mode) if slice_mode else None
         self.lat_coords = list(lat_coords) if lat_coords else None
@@ -110,8 +112,12 @@ class NetCDFDataset(Dataset):
         shape = var.shape
         dims = var.dims
 
-        # Compute number of samples based on slice_mode
         n = self._compute_sample_count(shape, dims)
+
+        if self.fill_ratio_threshold < 1.0:
+            valid_indices = self._prefilter_file(ds, shape, dims, n)
+        else:
+            valid_indices = list(range(n))
 
         ds.close()
 
@@ -119,8 +125,9 @@ class NetCDFDataset(Dataset):
             "filepath": filepath,
             "shape": shape,
             "dims": dims,
+            "valid_indices": valid_indices,
         })
-        return n
+        return len(valid_indices)
 
     def _compute_sample_count(self, shape, dims) -> int:
         """Compute expected number of samples by reducing over slice_mode axes.
@@ -158,6 +165,103 @@ class NetCDFDataset(Dataset):
         )
 
         return reduce(mul, counts, 1)
+
+    def _prefilter_file(self, ds, shape, dims, total_count):
+        """Return list of local indices whose fill ratio is within threshold."""
+        dims_list = list(dims)
+        if self.slice_mode is not None:
+            effective_mode = list(self.slice_mode)
+        else:
+            effective_mode = ["time"]
+
+        index_map = {
+            "time": self.time_indices,
+            "depth": self.depth_indices,
+            "latitude": self.lat_indices,
+            "longitude": self.lon_indices,
+        }
+
+        sizes = list(ds.sizes.values())
+        counts = [_resolve_axis_count(sizes, dims_list, axis, index_map.get(axis)) for axis in effective_mode]
+
+        valid = []
+        for local_idx in range(total_count):
+            indices = []
+            remaining = local_idx
+            for count in reversed(counts):
+                indices.append(remaining % count)
+                remaining //= count
+            indices = list(reversed(indices))
+
+            def _resolve_iter_idx(axis, iter_idx):
+                spec = index_map.get(axis)
+                axis_size = sizes[dims_list.index(axis)] if axis in dims_list else 0
+                if spec is None:
+                    return iter_idx
+                if isinstance(spec, int):
+                    return spec
+                if isinstance(spec, slice):
+                    start, stop, step = spec.indices(axis_size)
+                    return start + iter_idx * step
+                if isinstance(spec, (list, tuple)):
+                    return spec[iter_idx]
+                return iter_idx
+
+            fixed = {axis: _resolve_iter_idx(axis, idx) for axis, idx in zip(effective_mode, indices)}
+            sel_kw = {dim: idx for dim, idx in fixed.items() if dim in dims_list}
+            selection = ds.isel(sel_kw) if sel_kw else ds
+
+            fill_ratio = 0.0
+            for var_name in self._raw_vars_needed:
+                if var_name not in ds.data_vars:
+                    continue
+                arr = selection[var_name].values
+                total = arr.size
+                if total == 0:
+                    continue
+                fv = ds[var_name].attrs.get("_FillValue", None)
+                fill_count = int(np.sum(arr == fv)) if fv is not None else 0
+                fill_count += int(np.sum(np.isnan(arr.astype(np.float32))))
+                ratio = fill_count / total
+                fill_ratio = max(fill_ratio, ratio)
+
+            if fill_ratio <= self.fill_ratio_threshold:
+                valid.append(local_idx)
+            else:
+                logger.debug(
+                    "Skipping sample %d: fill_ratio %.3f > threshold %.3f",
+                    local_idx, fill_ratio, self.fill_ratio_threshold,
+                )
+
+        per_dim_counts = {axis: set() for axis in effective_mode}
+        for local_idx in valid:
+            indices = []
+            remaining = local_idx
+            for count in reversed(counts):
+                indices.append(remaining % count)
+                remaining //= count
+            indices = list(reversed(indices))
+            for axis, idx in zip(effective_mode, indices):
+                spec = index_map.get(axis)
+                axis_size = sizes[dims_list.index(axis)] if axis in dims_list else 0
+                if spec is None:
+                    per_dim_counts[axis].add(idx)
+                elif isinstance(spec, int):
+                    per_dim_counts[axis].add(spec)
+                elif isinstance(spec, slice):
+                    start, _, step = spec.indices(axis_size)
+                    per_dim_counts[axis].add(start + idx * step)
+                elif isinstance(spec, (list, tuple)):
+                    per_dim_counts[axis].add(spec[idx])
+
+        dim_summary = ", ".join(
+            f"{axis}={len(per_dim_counts[axis])}" for axis in effective_mode
+        )
+        logger.info(
+            "Prefiltered %d/%d samples (%s) threshold=%.2f",
+            len(valid), total_count, dim_summary, self.fill_ratio_threshold,
+        )
+        return valid
 
     def _compute_valid_times(self, ds, shape, dims):
         time_dim_size = self._get_time_size(shape, dims)
@@ -198,10 +302,16 @@ class NetCDFDataset(Dataset):
         meta = self._file_meta[file_idx]
         filepath = meta["filepath"]
 
+        valid_indices = meta.get("valid_indices")
+        if valid_indices is not None:
+            actual_local_idx = valid_indices[local_idx]
+        else:
+            actual_local_idx = local_idx
+
         try:
-            return self._getitem_with_slicer(filepath, local_idx)
+            return self._getitem_with_slicer(filepath, actual_local_idx)
         except Exception as e:
-            logger.error(f"Failed to load data from {filepath}: {e}")
+            logger.error(f"Failed to load data from %s: %s", filepath, e)
             return self._get_dummy_sample()
 
 
@@ -234,7 +344,24 @@ class NetCDFDataset(Dataset):
             indices.append(remaining % count)
             remaining //= count
         indices = list(reversed(indices))
-        fixed_indices = dict(zip(effective_mode, indices))
+
+        def _resolve_iter_idx(axis: str, iter_idx: int) -> int:
+            spec = index_map.get(axis)
+            axis_size = sizes[dims.index(axis)] if axis in dims else 0
+            if spec is None:
+                return iter_idx
+            if isinstance(spec, int):
+                return spec
+            if isinstance(spec, slice):
+                start, stop, step = spec.indices(axis_size)
+                return start + iter_idx * step
+            if isinstance(spec, (list, tuple)):
+                return spec[iter_idx]
+            return iter_idx
+
+        fixed_indices = {
+            axis: _resolve_iter_idx(axis, idx) for axis, idx in zip(effective_mode, indices)
+        }
 
         sel_kw = {dim: idx for dim, idx in fixed_indices.items() if dim in ds.dims}
         selection = ds.isel(sel_kw) if sel_kw else ds
@@ -264,6 +391,7 @@ class NetCDFDataset(Dataset):
                 fv = selection[var_name].attrs["_FillValue"]
                 fill_mask = (arr == fv)
                 arr = np.where(fill_mask, np.nan, arr)
+            fill_mask = fill_mask | np.isnan(arr)
             raw_data[var_name] = arr
             raw_fill_masks[var_name] = fill_mask
 
@@ -320,6 +448,8 @@ class NetCDFDataset(Dataset):
         coverage = float(mask_tensor.mean())
         coverage_ok = coverage >= self.coverage_threshold
 
+        fill_ratio = float(fill_mask_tensor.mean())
+
         return {
             "image": image,
             "mask": mask_tensor,
@@ -333,6 +463,7 @@ class NetCDFDataset(Dataset):
                 "slice_mode": self.slice_mode,
                 "coverage": coverage,
                 "coverage_ok": coverage_ok,
+                "fill_ratio": fill_ratio,
                 "variables": self.variables,
             },
         }
@@ -541,9 +672,15 @@ class NetCDFDataset(Dataset):
             else:
                 # Regular slicing modes
                 output_dims = [d for d in dims_list if d not in self.slice_mode]
+                index_map = {
+                    "time": self.time_indices,
+                    "depth": self.depth_indices,
+                    "latitude": self.lat_indices,
+                    "longitude": self.lon_indices,
+                }
                 if len(output_dims) >= 2:
-                    H = shape[dims_list.index(output_dims[0])]
-                    W = shape[dims_list.index(output_dims[1])]
+                    H = _resolve_axis_count(shape, dims_list, output_dims[0], index_map.get(output_dims[0]))
+                    W = _resolve_axis_count(shape, dims_list, output_dims[1], index_map.get(output_dims[1]))
                     return C, H, W
                 elif len(shape) >= 2:
                     return C, shape[-2], shape[-1]

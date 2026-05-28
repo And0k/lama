@@ -7,13 +7,13 @@ defaults:
 # Scaling overrides: add |V|, keep all others from the data default
 scaling:
   "|V|": ~    # computed at runtime from uo/vo if None
-  thetao: [-3.0, 40.0]
-  so: [0.0, 40.0]
+  thetao: [-2.0, 22.0]  # Temperature: surface ~20°C, bottom ~4°C
+  so: [29.0, 36.0]      # Salinity: surface ~30 PSU, bottom ~35 PSU
   uo: [-2.0, 2.0]
   vo: [-2.0, 2.0]
   wo: [-0.5, 0.5]
-  bottomT: [-3.0, 40.0]
-  sob: [0.0, 40.0]
+  bottomT: [-2.0, 22.0]
+  sob: [29.0, 36.0]
 
 # Which variables to include as output channels
 output_channels:
@@ -26,7 +26,8 @@ computed_variables:
     inputs: ["uo", "vo"]
     operation: velocity_magnitude
 
-# Mask generator config
+# Mask generator config — used for horizontal slices (lat×lon)
+# Vertical slices use their own vertical mask via projection config
 mask_generator:
   _target_: saicinpainting.training.data.masks.MixedMaskGenerator
   irregular_proba: 1.0
@@ -36,26 +37,38 @@ mask_generator:
   superres_proba: 0.0
   outpainting_proba: 0.0
 
-# Projections to run
+# Vertical mask config — applied automatically for vertical slice projections
+vertical_mask:
+  n_lines: 15
+  x_num: 20
+  y_num: 24
+  y_law: log
+  seed: 42
+
+# Projections to run — each gets its own mask type automatically
 projections:
   time_depth:
     slice_mode: ["time", "depth"]
     dim_labels: ["latitude", "longitude"]
+    mask_type: horizontal
     extra_kwargs: {}
-  time_lat:
+  time_latitude:
     slice_mode: ["time", "latitude"]
     dim_labels: ["depth", "longitude"]
+    mask_type: vertical
     extra_kwargs:
-      lat_indices: { _type_: slice, start: 0, stop: 8 }
-  time_lon:
+      lat_indices: { _type_: slice, start: 10, stop: 50 }
+  time_longitude:
     slice_mode: ["time", "longitude"]
     dim_labels: ["depth", "latitude"]
+    mask_type: vertical
     extra_kwargs:
-      lon_indices: { _type_: slice, start: 0, stop: 8 }
+      lon_indices: { _type_: slice, start: 10, stop: 50 }
 
 # Demo hyper-parameters (remainder of config values)
 time_indices: [0]
 depth_indices: { _type_: slice, start: 0, stop: 3 }
+fill_ratio_threshold: 0.5  # Skip slices where _FillValue ratio exceeds this (1.0 = no filtering)
 
 # Model search paths (Hydra resolvers evaluate env vars)
 model_candidates:
@@ -66,5 +79,7 @@ model_candidates:
   - label: lama-pl-abl
     path: ${oc.env:PROJECT_ROOT}/LaMa_models/lama-pl-abl
 
-# CMEMS file candidates
-cems_candidates: []
+
+# NetCDF file candidates — override dataset.filepaths from data default
+# or set these paths to find real CMEMS data files
+cems_candidates: ["/mnt/b/WorkData/CMEMS/231220_inflow/_source_NetCDF/cmems_mod_bal_phy_anfc_P1D-m_multi-vars_10.51E-21.32E_54.02N-58.97N_0.50-91.31m_2023-10-01-2023-12-01.nc"]

@@ -34,7 +34,24 @@ def generate_vertical_mask(
     y_law: str = "log",
     seed: int | None = None,
 ) -> np.ndarray:
+    """Generate combined vertical mask (random lines + model points grid).
+
+    The mask covers most of the image. Only the vertical lines and grid
+    points remain as valid data — the model must reconstruct the rest.
+
+    Returns mask of shape (1, height, width) with:
+    - 1 = masked region (to be inpainted) — the large area
+    - 0 = valid data — only the narrow lines and grid points
+
+    Args:
+        shape: (height, width) of the output mask.
+        n_lines: Number of vertical lines that remain as valid data.
+        x_num: Number of grid points along x-axis that remain valid.
+        y_num: Number of grid points along y-axis that remain valid.
+        y_law: Spacing law for y-axis ("log" or "linear").
+        seed: Random seed for reproducibility.
+    """
     height, width = shape
     mask = vertical_random_lines_mask(width, height, n_lines=n_lines, seed=seed)
     mask = add_model_points(mask, x_num=x_num, y_num=y_num, y_law=y_law)
-    return mask[None, ...]  # Add channel dimension
+    return (mask > 0).astype(np.uint8)[None, ...]

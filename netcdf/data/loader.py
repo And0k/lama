@@ -98,3 +98,62 @@ def get_variable_info(filepath: str, variable: str) -> Dict:
     }
     ds.close()
     return info
+
+
+def read_units(filepath: str, var_names: List[str]) -> Dict[str, str]:
+    """Read units for each variable from the NetCDF file.
+
+    Args:
+        filepath: Path to NetCDF file.
+        var_names: List of variable names.
+
+    Returns:
+        Dictionary mapping variable names to unit strings.
+    """
+    units = {}
+    ds = xr.open_dataset(filepath)
+    for v in var_names:
+        if v == "|V|":
+            inp = ds["uo"].attrs.get("units", "m s-1") if "uo" in ds.data_vars else "m s-1"
+            units[v] = inp
+        elif v in ds.data_vars:
+            units[v] = ds[v].attrs.get("units", "")
+        else:
+            units[v] = ""
+    ds.close()
+    return units
+
+
+def resolve_output_channels(
+    filepath: str,
+    output_channels: List[str],
+    required: Optional[set] = None,
+) -> List[Dict[str, str]]:
+    """Return output channel descriptors, falling back if required vars missing.
+
+    Args:
+        filepath: Path to NetCDF file.
+        output_channels: List of desired output channel names.
+        required: Set of required variable names. Defaults to {"uo", "vo", "thetao", "so"}.
+
+    Returns:
+        List of dicts with "name" and "scaling_key" keys.
+    """
+    if required is None:
+        required = {"uo", "vo", "thetao", "so"}
+
+    ds = xr.open_dataset(filepath)
+    available = set(ds.data_vars.keys())
+    ds.close()
+
+    if required.issubset(available):
+        return [{"name": name, "scaling_key": name} for name in output_channels]
+
+    logger.warning(
+        "Not all required variables (%s) found in %s. Available: %s",
+        required, filepath, available,
+    )
+    fallback = [v for v in output_channels if v in available and v != "|V|"]
+    if not fallback:
+        fallback = list(available)[:3]
+    return [{"name": name, "scaling_key": name} for name in fallback[:3]]

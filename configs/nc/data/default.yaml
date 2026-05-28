@@ -33,6 +33,7 @@ dataset:
     superres_proba: 0.0
     outpainting_proba: 0.0
   coverage_threshold: 0.0
+  fill_ratio_threshold: 1.0  # Skip slices where _FillValue ratio exceeds this (1.0 = no filtering)
 
 dataloader_kwargs:
   batch_size: ${nc.data.batch_size}

@@ -153,6 +153,7 @@ dataset = NetCDFDataset(
     lon_indices=None,  # Used for time_lon mode
     lat_coords=[54.5, 55.0, 56.0],  # Used for coordinate mode
     lon_coords=[12.0, 15.0, 20.0],  # Used for coordinate mode
+    fill_ratio_threshold=0.5,  # Skip slices where >50% of cells are _FillValue/NaN
     mask_generator_params={
         'type': 'mixed',
         'params': {
@@ -166,7 +167,7 @@ dataset = NetCDFDataset(
 # For shape (T=62, D=27, H=298, W=390):
 # slice_mode=["time", "depth"] produces (H=298, W=390) lat×lon fields
 # Each time step yields one sample with selected depth
-# Total samples = number of time indices selected
+# Total samples = number of time indices selected (after fill_ratio filtering)
 dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
 ```
 
@@ -273,6 +274,31 @@ sample["fill_mask"].shape  # (3, H, W) — per-channel fill-value mask, NaN wher
 The `fill_mask` output key is backward-compatible — existing code that unpacks
 `image`, `mask`, `meta` is unaffected.
 
+### 5b. Fill Ratio Filtering
+
+Skip slices where too many cells are `_FillValue` or NaN. Useful for coastal
+or ice-covered regions where large portions of the grid are masked.
+
+```python
+dataset = NetCDFDataset(
+    filepaths=["/path/to/file.nc"],
+    variables=["thetao", "so"],
+    slice_mode=["time", "depth"],
+    time_indices=[0],
+    depth_indices=slice(0, 3),
+    fill_ratio_threshold=0.5,  # Exclude slices where >50% of cells are fill/NaN
+)
+```
+
+At init time, each candidate slice is checked. Slices whose maximum per-variable
+fill ratio exceeds the threshold are excluded. The metadata dict includes
+`fill_ratio` for each returned sample.
+
+Via Hydra CLI:
+```bash
+python bin/demo_nc.py nc.fill_ratio_threshold=0.5
+```
+
 ### 6. Running the Demo
 
 ```bash
@@ -281,7 +307,7 @@ python bin/demo_nc.py
 
 The demo is now Hydra-driven and configured via `configs/nc/demo/default.yaml`:
 - **3-channel inference**: `|V|`, `thetao`, `so` as 3 image channels
-- **NaN masking**: Fill-value regions are displayed as white via `cmap.set_bad(color='white')`
+- **Distinct mask colors**: Fill-value regions in light gray, generated masks in white
 - **Shared colorbars**: Each row has its own colorbar with physical units
 - **SSIM**: Computed on the first channel (`|V|`)
 - **Output**: 3×3 grid figures (3 variables × Original/Masked/Inpainted)
@@ -390,6 +416,7 @@ defaults:
 #     superres_proba: 0.0
 #     outpainting_proba: 0.0
 #   coverage_threshold: 0.0
+#   fill_ratio_threshold: 1.0  # Skip slices where _FillValue ratio exceeds this
 #   transform_variant: "light"  # "none", "light", "full" for augmentations
 #   transform_out_size: null    # [256, 256] for fixed-size models, None for native size
 ```
@@ -487,15 +514,84 @@ refiner:
 | NetCDF Loader | `netcdf/data/loader.py` | ✅ Complete |
 | Unified Slicing System | `netcdf/data/slicer.py` | ✅ Complete (`slice_nc`, `subset_xarray`, `subset_by_coords`) |
 | Mask Generator | `netcdf/mask_generator.py` | ✅ Complete |
+| Vertical Mask Generator | `netcdf/data/vertical_masks.py` | ✅ Complete |
 | PyTorch Dataset | `netcdf/data/dataset.py` | ✅ Complete |
+| Evaluation Metrics | `netcdf/evaluation.py` | ✅ Complete (`compute_ssim`, `resolve_vel_scaling`) |
+| Tensor Utilities | `netcdf/utils.py` | ✅ Complete (`pad_to_modulo`, `next_modulo`) |
 | Visualization | `netcdf/visualization.py` | ✅ Complete |
 | Data Augmentations | `netcdf/data/augment.py` | ✅ Complete |
 | Inference Script | `bin/predict_nc.py` | ✅ Complete |
 | Demo Script | `bin/demo_nc.py` | ✅ Complete (Hydra-driven, multi-variable) |
-| Computed Variables | `netcdf/data/dataset.py` | ✅ `|V| = sqrt(uo² + vo²)` |
+| Computed Variables | `netcdf/data/dataset.py` | ✅ `\|V\| = sqrt(uo² + vo²)` |
 | Fill Mask Tracking | `netcdf/data/dataset.py` | ✅ Per-channel NaN mask in sample dict |
+| Fill Ratio Filtering | `netcdf/data/dataset.py` | ✅ Skip slices exceeding `_FillValue` ratio threshold |
+| Unit Reading | `netcdf/data/loader.py` | ✅ `read_units()` for variable metadata |
+| Output Channel Resolution | `netcdf/data/loader.py` | ✅ `resolve_output_channels()` with fallback |
 | Tests | `tests/test_netcdf_package.py` | ✅ 24 tests passing |
 | Pipeline Tests | `tests/pipeline/` | ✅ 52 tests covering full inference pipeline |
+
+## Shared Modules
+
+The netcdf package provides reusable utilities that can be imported independently:
+
+### Evaluation (`netcdf/evaluation.py`)
+
+```python
+from netcdf.evaluation import compute_ssim, resolve_vel_scaling
+
+# Compute SSIM between original and inpainted images
+ssim_val = compute_ssim(original_array, inpainted_array)
+
+# Resolve velocity magnitude scaling from uo/vo ranges
+scaling = {"uo": (-2.0, 2.0), "vo": (-2.0, 2.0)}
+vmin, vmax = resolve_vel_scaling(scaling)
+```
+
+### Tensor Utilities (`netcdf/utils.py`)
+
+```python
+from netcdf.utils import pad_to_modulo, next_modulo
+
+# Pad tensor to multiple of 8 (required by LaMa architecture)
+padded, (orig_H, orig_W) = pad_to_modulo(tensor, mod=8)
+
+# Round up to nearest multiple
+next_mult8 = next_modulo(17, 8)  # Returns 24
+```
+
+### Data Loader Utilities (`netcdf/data/loader.py`)
+
+```python
+from netcdf.data.loader import read_units, resolve_output_channels
+
+# Read variable units from NetCDF file
+units = read_units("file.nc", ["thetao", "so", "|V|"])
+# Returns: {"thetao": "degC", "so": "PSU", "|V|": "m s-1"}
+
+# Resolve output channels with fallback for missing variables
+channels = resolve_output_channels("file.nc", ["|V|", "thetao", "so"])
+# Returns: [{"name": "thetao", "scaling_key": "thetao"}, ...]
+```
+
+### Visualization (`netcdf/visualization.py`)
+
+```python
+from netcdf.visualization import plot_netcdf_inference
+
+# Plot multi-channel inference with distinct fill-value and mask colors
+fig = plot_netcdf_inference(
+    channels=original_list,
+    inpainted=inpainted_list,
+    fill_masks=fill_mask_list,
+    generated_mask=mask_array,
+    var_names=["thetao", "so", "|V|"],
+    dim_x="longitude",
+    dim_y="latitude",
+    orig_shape=(H, W),
+    ssim_val=0.85,
+    units={"thetao": "degC", "so": "PSU", "|V|": "m s-1"},
+)
+```
 
 ## Limitations and Restrictions
 
@@ -576,22 +672,25 @@ For enhancing the NetCDF pipeline:
 2. ✅ Coordinate-based profile extraction mode (done)
 3. ✅ Oceanography-aware data augmentations (done)
 4. ✅ Velocity magnitude computation (`computed_variables`)
-5. ⬜ Variable-specific preprocessing (e.g., log transform for salinity)
-6. ⬜ Multi-file time-series aggregation for training
+5. ✅ Fill ratio filtering (`fill_ratio_threshold`)
+6. ⬜ Variable-specific preprocessing (e.g., log transform for salinity)
+7. ⬜ Multi-file time-series aggregation for training
 
 ## File Structure
 
 ```
-netcdf/                              # 🆕 NetCDF-extension (autonomous package)
+netcdf/                              # NetCDF-extension (autonomous package)
 ├── data/
 │   ├── __init__.py        # Package exports
 │   ├── dataset.py         # PyTorch Dataset with slicing and transforms
-│   ├── loader.py          # NetCDF loading with fill value handling
+│   ├── loader.py          # NetCDF loading, fill value handling, unit reading
 │   ├── slicer.py          # Unified 4D slicing system (index and coordinate-based)
 │   ├── augment.py         # Oceanography-safe data augmentations
-│   └── visualization_nc.py # Matplotlib utilities
+│   └── vertical_masks.py  # Vertical mask generation for depth slices
+├── evaluation.py          # SSIM computation, velocity scaling resolution
 ├── mask_generator.py      # Mask generator wrapper
-└── visualization.py       # Visualization utilities
+├── utils.py               # Tensor utilities (padding, modulo operations)
+└── visualization.py       # Visualization utilities (inference grids, comparisons)
 ```
 
 ## Example: Real Data
