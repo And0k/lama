@@ -1,0 +1,8 @@
+# @package _group_
+kind: default
+ssim: true
+lpips: false
+fid: false
+rmse: true
+correlation: true
+integral_kind: null

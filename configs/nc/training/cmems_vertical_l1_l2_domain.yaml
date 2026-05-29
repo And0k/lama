@@ -49,6 +49,8 @@ defaults:
   - discriminator: /nc/training/discriminator/pix2pixhd_nlayer
   - optimizers: /nc/training/optimizers/default
   - visualizer: directory
-  - evaluator: default_inpainted
+  - evaluator: /nc/evaluator/physical
   - trainer: any_gpu_large_ssim_ddp_final
   - hydra: overrides
+  - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog

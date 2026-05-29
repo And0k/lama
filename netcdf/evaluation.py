@@ -5,6 +5,8 @@ import logging
 import numpy as np
 import torch
 
+from saicinpainting.evaluation.losses.base_loss import PairwiseScore
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,3 +58,41 @@ def resolve_vel_scaling(
         vmax = np.sqrt(max(abs(uo_min), uo_max) ** 2 + max(abs(vo_min), vo_max) ** 2)
         return (0.0, float(vmax))
     return tuple(vel_cfg)
+
+
+class RMSEScore(PairwiseScore):
+    """Per-sample RMSE between prediction and target."""
+
+    def __init__(self):
+        super().__init__()
+        self.reset()
+
+    def forward(self, pred_batch, target_batch, mask=None):
+        pred = pred_batch.detach().cpu()
+        target = target_batch.detach().cpu()
+        B = pred.shape[0]
+        pred_flat = pred.reshape(B, -1).float()
+        target_flat = target.reshape(B, -1).float()
+        batch_values = torch.sqrt((pred_flat - target_flat).pow(2).mean(dim=-1)).numpy()
+        self.individual_values = np.hstack([self.individual_values, batch_values])
+        return batch_values
+
+
+class CorrelationScore(PairwiseScore):
+    """Per-sample Pearson correlation between prediction and target."""
+
+    def __init__(self):
+        super().__init__()
+        self.reset()
+
+    def forward(self, pred_batch, target_batch, mask=None):
+        pred = pred_batch.detach().cpu().numpy()
+        target = target_batch.detach().cpu().numpy()
+        B = pred.shape[0]
+        batch_values = np.empty(B)
+        for i in range(B):
+            p = pred[i].flatten()
+            t = target[i].flatten()
+            batch_values[i] = np.corrcoef(p, t)[0, 1]
+        self.individual_values = np.hstack([self.individual_values, batch_values])
+        return batch_values

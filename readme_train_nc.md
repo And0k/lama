@@ -11,16 +11,16 @@ separate generator / discriminator optimizers).
 
 ## Key Differences from Image Training
 
-| Aspect | Image Training | NetCDF Training |
-|--------|---------------|-----------------|
-| Data format | RGB images (C,H,W) | NetCDF 4D (T,D,Lat,Lon) → 2D slices |
-| Slice mode | N/A | `["time", "latitude"]` → depth × lon |
-| Mask type | Irregular (MixedMaskGenerator) | Vertical lines (profile gaps) |
-| Loss function | L1 + perceptual (VGG) | L1 + L2 + adversarial + domain losses |
-| Perceptual loss | Enabled (VGG/ResNet) | Disabled (not useful for physical fields) |
-| Augmentation | Random flip, crop, color jitter | Flip, noise, depth dropout |
-| Channels | 3 (RGB) | 3 (|V|, thetao, so) |
-| Optimisation | Automatic (PL) | Manual (PL 2.6, two optimizers) |
+| Aspect          | Image Training                  | NetCDF Training                           |
+| --------------- | ------------------------------- | ----------------------------------------- |
+| Data format     | RGB images (C,H,W)              | NetCDF 4D (T,D,Lat,Lon) → 2D slices       |
+| Slice mode      | N/A                             | `["time", "latitude"]` → depth × lon      |
+| Mask type       | Irregular (MixedMaskGenerator)  | Vertical lines (profile gaps)             |
+| Loss function   | L1 + perceptual (VGG)           | L1 + L2 + adversarial + domain losses     |
+| Perceptual loss | Enabled (VGG/ResNet)            | Disabled (not useful for physical fields) |
+| Augmentation    | Random flip, crop, color jitter | Flip, noise, depth dropout                |
+| Channels        | 3 (RGB)                         | 3 (V, thetao, so)                         |
+| Optimisation    | Automatic (PL)                  | Manual (PL 2.6, two optimizers)           |
 
 ## Loss Functions
 
@@ -62,7 +62,7 @@ Penalizes predictions outside valid ranges. MSE of the violation per channel.
 domain:
   bounds:
     weight: 0.5
-    bounds:           # Per-channel [vmin, vmax] in [0,1] scaled space
+    bounds:          # Per-channel [vmin, vmax] in [0,1] scaled space
       - [0.0, 1.0]   # |V| (velocity magnitude, always ≥ 0)
       - [0.0, 1.0]   # thetao
       - [0.0, 1.0]   # so
@@ -102,18 +102,6 @@ transform:
   noise_sigma: 0.01
   depth_dropout: 0.1
 ```
-
-## OmegaConf Resolvers
-
-Index specs use custom resolvers registered in `bin/train.py`:
-
-```yaml
-lat_indices: ${slice:48,126}       # → slice(48, 126)
-lon_indices: ${slice:141,365,2}    # → slice(141, 365, 2)
-some_list: ${indices:1,5,8,21}    # → [1, 5, 8, 21]
-```
-
-No `eval()` or string parsing — OmegaConf resolves these at config load time.
 
 ## Configuration Files
 
@@ -196,10 +184,30 @@ source .venv/bin/activate
   data.nc.data.val.batch_size=1
 ```
 
-### Full Training
+### First Real Run (5 epochs, full dataset)
+
+```bash
+.venv/bin/python bin/train.py \
+  --config-name=cmems_vertical_l1_l2_domain \
+  trainer.kwargs.max_epochs=5 \
+  trainer.kwargs.limit_train_batches=4836 \
+  trainer.kwargs.val_check_interval=4836
+```
+
+### Full Training (40 epochs)
 
 ```bash
 .venv/bin/python bin/train.py --config-name=cmems_vertical_l1_l2_domain
+```
+
+With 4,836 samples and batch_size=2, one epoch = 2,418 steps. Override to
+align epoch counter with actual data passes:
+
+```bash
+.venv/bin/python bin/train.py \
+  --config-name=cmems_vertical_l1_l2_domain \
+  trainer.kwargs.limit_train_batches=2418 \
+  trainer.kwargs.val_check_interval=2418
 ```
 
 ### Resume from Checkpoint
@@ -218,16 +226,50 @@ source .venv/bin/activate
   'data.nc.data.dataset.filepaths=["/path/to/other.nc"]'
 ```
 
-### Fine-tune from Pretrained big-lama
+### GPU Training
 
-The pretrained generator (`input_nc=4, output_nc=3`) matches the NC config
-channel layout. See `readme_train_nc_next.md` for the loading procedure.
+```bash
+.venv/bin/python bin/train.py \
+  --config-name=cmems_vertical_l1_l2_domain \
+  trainer.kwargs.accelerator=gpu \
+  trainer.kwargs.devices=1 \
+  trainer.kwargs.precision=16 \
+  data.nc.data.batch_size=4 \
+  data.nc.data.dataloader_kwargs.batch_size=4
+```
+
+## Key Metrics to Watch
+
+| Metric | Where | What It Tells You |
+|--------|-------|-------------------|
+| `train_gen_l1` | TB / stdout | L1 reconstruction loss (should decrease steadily) |
+| `train_gen_l2` | TB | L2 loss (should decrease; faster = more large errors fixed) |
+| `train_gen_adv` | TB | Adversarial loss (should oscillate, not collapse to 0) |
+| `train_gen_smooth` | TB | Smoothness penalty (should decrease then stabilize) |
+| `train_gen_bounds` | TB | Bounds violation (should approach 0 quickly) |
+| `train_gen_grad` | TB | Gradient consistency (should decrease) |
+| `train_discr_adv` | TB | Discriminator loss (should stabilize, not diverge) |
+| `val_ssim` | TB / checkpoint | Structural similarity on validation (should increase) |
+| `val_rmse` | TB | RMSE on validation (should decrease) |
+| `val_correlation` | TB | Pearson correlation on validation (should increase) |
+
+### Red Flags
+
+| Symptom | Likely Cause | Fix |
+|---------|-------------|-----|
+| `gen_l1` not decreasing | Learning rate too low, or bug | Check data loading, increase lr |
+| `gen_adv` → 0 instantly | Discriminator too weak | Increase discr capacity or lr |
+| `discr_adv` → 0 instantly | Discriminator too strong | Decrease discr lr or weight |
+| NaN in losses | Numerical instability | Lower lr, check scaling ranges |
+| `gen_smooth` dominates | Smoothness weight too high | Decrease `domain.smoothness.weight` |
+| Validation SSIM = 0.1 | Model outputs constant | Check data pipeline, augmentation |
 
 ## Testing
 
 ```bash
-.venv/bin/python -m pytest tests/test_nc_losses.py -v       # Domain losses (22 tests)
-.venv/bin/python -m pytest tests/test_netcdf_package.py -v   # NetCDF package (34 tests)
+.venv/bin/python -m pytest tests/test_nc_losses.py -v       # Domain losses
+.venv/bin/python -m pytest tests/test_netcdf_package.py -v   # NetCDF package
+.venv/bin/python -m pytest tests/test_nc_advanced.py -v      # Preprocessing, multi-file, coordinates
 ```
 
 ## File Structure
@@ -243,15 +285,10 @@ configs/training/
 ├── hydra/overrides.yaml                # Output dir template
 └── data/cmems_vertical.yaml            # → nc/data/cmems_vertical (redirect)
 
-configs/nc/data/
-├── cmems_vertical.yaml                 # Standalone data config (for demo/inference)
-└── default.yaml                        # Base NC data config template
-
 saicinpainting/training/losses/
 ├── physical.py                         # Domain losses: smoothness, bounds, gradient
 ├── feature_matching.py                 # L1/L2 masked losses + feature matching
 ├── adversarial.py                      # NonSaturatingWithR1 GAN loss
-└── ...
 
 saicinpainting/training/trainers/
 ├── base.py                             # Manual opt, domain loss init, NC dataloaders, PL 2.6 compat
@@ -261,9 +298,9 @@ netcdf/data/
 ├── dataset.py                          # NetCDFDataset: slicing, transforms, lon subsetting
 ├── slicer.py                           # resolve_indices, _resolve_axis_count, subset_xarray
 ├── augment.py                          # Oceanography-safe augmentations
-└── ...
 
 tests/
-├── test_nc_losses.py                   # 22 tests for domain losses
-└── test_netcdf_package.py              # 34 tests for NetCDF package
+├── test_nc_losses.py                   # Domain losses tests
+├── test_netcdf_package.py              # NetCDF package tests
+└── test_nc_advanced.py                 # Preprocessing, multi-file, coordinates tests
 ```

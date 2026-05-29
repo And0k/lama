@@ -55,7 +55,6 @@ from netcdf.evaluation import compute_ssim, resolve_vel_scaling
 from netcdf.utils import pad_to_modulo
 from netcdf.visualization import plot_netcdf_inference
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -192,7 +191,7 @@ def demo_inference(nc_file: str, cfg: DictConfig) -> None:
 # Main
 # ===================================================================
 
-@hydra.main(config_path="../configs", config_name="nc/demo/default", version_base=None)
+@hydra.main(config_path="../configs", config_name="demo_nc", version_base=None)
 def main(cfg: DictConfig) -> None:
     cfg = cfg._group_
     log.info("NetCDF Integration Demo for LaMa Inpainting (Hydra-driven)")

@@ -1,0 +1,30 @@
+# @package _group_
+# Variable-specific preprocessing transforms for NetCDF data.
+# Applied before [0,1] scaling to each variable independently.
+#
+# Supported transform types:
+#   log:          Logarithmic transform (base: "natural", "10", "2"; offset: float)
+#   sqrt:         Square-root transform
+#   power:        General power transform (exponent: float)
+#   depth_dependent: Depth-dependent scaling (surface_factor, deep_factor, depth_threshold)
+#
+# Example: log transform for salinity
+#   so:
+#     type: log
+#     offset: 1.0
+#
+# Example: depth-dependent scaling for temperature
+#   thetao:
+#     type: depth_dependent
+#     surface_factor: 1.2
+#     deep_factor: 0.8
+#     depth_threshold: 500.0
+
+# Uncomment to enable preprocessing:
+# variable_transforms:
+#   so:
+#     type: log
+#     offset: 1.0
+#   thetao:
+#     type: power
+#     exponent: 0.5

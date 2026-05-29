@@ -101,13 +101,130 @@ Use vertical masks in slice_mode `["time", "latitude"]` or `["time", "longitude"
 python bin/demo_nc.py
 ```
 
+### `nc/evaluator/physical.yaml`
+
+Physical metrics evaluator for NetCDF training (RMSE, Correlation, SSIM):
+
+```yaml
+# @package _group_
+kind: default
+ssim: true
+lpips: false
+fid: false
+rmse: true
+correlation: true
+integral_kind: null
+```
+
+Replaces LPIPS/FID with physics-relevant metrics aligned to L1/L2 training losses.
+Used by default in NC training configs (`lama_small_nc.yaml`, `cmems_vertical_l1_l2_domain.yaml`).
+
 ### `nc/training/optimizers/default.yaml`
 
-Optimizer settings (ADAM with betas [0.0, 0.999]).
+ADAM optimizer settings (betas [0.0, 0.999]).
 
 ### `nc/data/transforms/transforms_nc.yaml`
 
 Data augmentation and normalization for NetCDF slices.
+
+## Training Configuration
+
+### `nc/training/lama_small_nc.yaml`
+
+Main training config for NetCDF oceanographic inpainting:
+
+```yaml
+run_title: "lama_netcdf_small"
+
+training_model:
+  kind: default
+  visualize_each_iters: 1000
+  concat_mask: true
+  store_discr_outputs_for_vis: true
+
+losses:
+  l1:
+    weight_missing: 0
+    weight_known: 10
+  perceptual:
+    weight: 0
+  adversarial:
+    kind: r1
+    weight: 10
+    gp_coef: 0.001
+    mask_as_fake_target: true
+    allow_scale_mask: true
+  feature_matching:
+    weight: 100
+  resnet_pl:
+    weight: 30
+    weights_path: ${env:TORCH_HOME}
+
+defaults:
+  - location: docker
+  - _self_
+  - data: default
+  - generator: ffc_resnet_075
+  - discriminator: pix2pixhd_nlayer
+  - optimizers: default
+  - visualizer: directory
+  - evaluator: /nc/evaluator/physical
+  - trainer: any_gpu_large_ssim_ddp_final
+  - hydra: overrides
+```
+
+## Model Configuration
+
+### `nc/model/lama_small_nc.yaml`
+
+```yaml
+_target_: models.factory.build_model
+in_channels: 3
+num_classes: 3
+generator_cfg:
+  _target_: saicinpainting.training.modules.ffc.FFCResNetGenerator
+  input_nc: ${in_channels}
+  output_nc: ${num_classes}
+  ngf: 64
+  n_downsampling: 3
+  n_blocks: 9
+```
+
+## Prediction Configuration
+
+### `nc/prediction/default.yaml`
+
+```yaml
+# @package _group_
+indir: no       # override in CLI
+outdir: no      # override in CLI
+
+model:
+  path: no      # override in CLI
+  checkpoint: last.ckpt
+
+dataset:
+  kind: default
+  slice_mode: ["time", "depth"]
+  time_index: 0
+  depth_indices: null  # e.g., [0,1,2] or slice(0,10)
+
+device: cuda
+out_key: inpainted
+batch_size: 1
+num_workers: 0
+max_samples: null
+
+refine: False
+refiner:
+  gpu_ids: 0,1
+  modulo: 8
+  n_iters: 15
+  lr: 0.002
+  min_side: 256
+  max_scales: 3
+  px_budget: 1800000
+```
 
 ## Standard LaMa Configuration
 
@@ -127,14 +244,135 @@ python bin/train.py -cn nc/lama_small_nc \
 For inference:
 ```bash
 python bin/predict_nc.py \
-  --config-name nc/prediction/default \
-  nc.dataset.filepaths=["/path/to/file.nc"] \
-  nc.dataset.slice_mode=["time","depth"] \
-  nc.dataset.depth_indices="[0,1,2,3,4]"
+  dataset.filepaths=["/path/to/file.nc"] \
+  dataset.slice_mode=["time","depth"] \
+  dataset.depth_indices=[0,1,2,3,4]
 ```
 
 To skip slices with too many fill values:
 ```bash
 python bin/demo_nc.py \
   nc.fill_ratio_threshold=0.5  # Skip slices where >50% of cells are _FillValue
+```
+
+## OmegaConf Resolvers
+
+netcdf/resolvers.py — single registration point for slice, indices, env resolvers,
+so index specs are parsed via OmegaConf resolvers in this way:
+
+```yaml
+lat_indices: ${slice:48,126}       # → slice(48, 126)
+lon_indices: ${slice:141,365,2}    # → slice(141, 365, 2)
+some_list: ${indices:1,5,8,21}    # → [1, 5, 8, 21]
+```
+
+
+## Advanced Features
+
+### `nc/data/variable_transforms.yaml`
+
+Variable-specific preprocessing transforms applied before [0,1] scaling:
+
+```yaml
+# @package _group_
+variable_transforms:
+  so:                        # Log transform for salinity
+    type: log
+    offset: 1.0
+  thetao:                    # Square-root transform for temperature
+    type: sqrt
+  wo:                        # Power transform for vertical velocity
+    type: power
+    exponent: 0.3
+  bottomT:                   # Depth-dependent scaling
+    type: depth_dependent
+    surface_factor: 1.2
+    deep_factor: 0.8
+    depth_threshold: 500.0
+```
+
+**Supported transform types:**
+- `log`: Logarithmic transform. Params: `base` ("natural", "10", "2"), `offset` (default 1.0)
+- `sqrt`: Square-root transform. No params.
+- `power`: General power transform. Params: `exponent` (default 0.5)
+- `depth_dependent`: Depth-dependent scaling. Params: `surface_factor`, `deep_factor`, `depth_threshold`
+
+**Usage in dataset config:**
+```yaml
+dataset:
+  _target_: netcdf.data.dataset.NetCDFDataset
+  variable_transforms:
+    so:
+      type: log
+      offset: 1.0
+```
+
+**Usage in Hydra CLI:**
+```bash
+python bin/train.py -cn nc/lama_small_nc \
+  nc.data.dataset.variable_transforms.so.type=log \
+  nc.data.dataset.variable_transforms.so.offset=1.0
+```
+
+### `nc/data/multi_file.yaml`
+
+Multi-file time-series aggregation:
+
+```yaml
+# @package _group_
+dataset:
+  _target_: netcdf.data.multi_file.MultiFileNetCDFDataset
+  filepaths: ["/path/to/file1.nc", "/path/to/file2.nc"]
+  variables: ["thetao", "so"]
+  time_axis: "time"
+  deduplicate: true           # Remove duplicate time steps across files
+  sequence_length: 3          # Create temporal sequences of 3 consecutive frames
+```
+
+**Key parameters:**
+- `deduplicate`: When files overlap in time, keep only the first occurrence
+- `sequence_length`: Number of consecutive time steps per sample. Set to 1 for single frames.
+- `time_axis`: Name of the time dimension (default "time")
+
+**Usage:**
+```python
+from netcdf.data.multi_file import MultiFileNetCDFDataset
+dataset = MultiFileNetCDFDataset(
+    filepaths=["file1.nc", "file2.nc", "file3.nc"],
+    variables=["thetao", "so"],
+    scaling={"thetao": (-3.0, 40.0), "so": (0.0, 40.0)},
+    deduplicate=True,
+    sequence_length=3,
+)
+```
+
+### `nc/data/coordinates.yaml`
+
+Advanced coordinate system support:
+
+```yaml
+# @package _group_
+regrid:
+  enabled: true
+  method: bilinear           # "bilinear" or "nearest"
+  target_lat_size: 180
+  target_lon_size: 360
+```
+
+**Functions:**
+- `detect_coordinate_system(filepath)`: Detect regular, rotated pole, or curvilinear grids
+- `rotated_to_regular(lat, lon, pole_lat, pole_lon)`: Convert rotated coordinates
+- `regrid_dataset(in, out, ...)`: Regrid a NetCDF file to regular lat/lon
+
+**Usage:**
+```python
+from netcdf.data.coordinates import detect_coordinate_system, regrid_dataset
+
+# Detect coordinate system
+cs = detect_coordinate_system("ocean_model_output.nc")
+print(cs["type"])  # "rotated_pole" or "curvilinear"
+
+# Regrid to regular lat/lon
+regrid_dataset("ocean_model_output.nc", "regular_latlon.nc",
+               target_lat_size=180, target_lon_size=360)
 ```

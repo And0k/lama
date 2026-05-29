@@ -1,4 +1,5 @@
 import enum
+import logging
 from copy import deepcopy
 
 import numpy as np
@@ -9,8 +10,8 @@ try:
     from detectron2.config import get_cfg
     from detectron2.engine import DefaultPredictor
     DETECTRON_INSTALLED = True
-except:
-    print("Detectron v2 is not installed")
+except Exception:
+    logging.getLogger(__name__).debug("Detectron v2 is not installed")
     DETECTRON_INSTALLED = False
 
 from .countless.countless2d import zero_corrected_countless

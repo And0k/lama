@@ -11,7 +11,7 @@ dataset:
   depth_indices: null  # e.g., [0,1,2] or null for all
   lat_indices: null    # Used with slice_mode=["time", "latitude"]
   lon_indices: null    # Used with slice_mode=["time", "longitude"]
-  slice_mode: ["time", "depth"]  # ["time", "latitude"], ["time", "longitude"], or null, time_lat (depth×lon), time_lon (depth×lat), null for original
+  slice_mode: ["time", "depth"]  # Also: ["time", "latitude"], ["time", "longitude"], or null
 
 # Model/checkpoint
 checkpoint: no  # Required: set via CLI override

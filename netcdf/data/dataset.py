@@ -22,6 +22,7 @@ import xarray as xr
 
 from ..mask_generator import generate_mask
 from .slicer import _resolve_axis_count, compute_sample_count, resolve_indices, subset_xarray
+from .preprocessing import PreprocessingPipeline
 
 import logging
 
@@ -59,6 +60,7 @@ class NetCDFDataset(Dataset):
         lat_coords: Optional[List[float]] = None,
         lon_coords: Optional[List[float]] = None,
         computed_variables: Optional[Dict[str, Dict]] = None,
+        variable_transforms: Optional[Union[Dict, PreprocessingPipeline]] = None,
     ):
         self.filepaths = filepaths
         self.variables = variables
@@ -76,6 +78,13 @@ class NetCDFDataset(Dataset):
         self.slice_mode = list(slice_mode) if slice_mode else None
         self.lat_coords = list(lat_coords) if lat_coords else None
         self.lon_coords = list(lon_coords) if lon_coords else None
+
+        if isinstance(variable_transforms, PreprocessingPipeline):
+            self._preprocessing = variable_transforms
+        elif isinstance(variable_transforms, dict):
+            self._preprocessing = PreprocessingPipeline.from_config(variable_transforms)
+        else:
+            self._preprocessing = PreprocessingPipeline()
 
         self._raw_vars_needed = []
         for var in self.variables:
@@ -133,10 +142,8 @@ class NetCDFDataset(Dataset):
         """Compute expected number of samples by reducing over slice_mode axes.
 
         self.slice_mode should be defined as a sequence of dimension names,
-        e.g. ["time", "latitude"] instead of "time_lat". This eliminates
-        branching entirely—each axis contributes multiplicatively via a
-        single uniform resolution path.
-        
+        e.g. ["time", "latitude"]
+
         For slice_mode=["coordinate"], samples are combinations of:
         - time_indices × lat_coords × lon_coords
         """
@@ -418,6 +425,12 @@ class NetCDFDataset(Dataset):
 
         H, W = raw_data[self._raw_vars_needed[0]].shape
 
+        if self._preprocessing and self._preprocessing.transforms:
+            depth_arr = None
+            if "depth" in selection.coords:
+                depth_arr = selection["depth"].values
+            raw_data = self._preprocessing(raw_data, depth=depth_arr)
+
         if self.mask_variable is not None and self.mask_variable in ds.data_vars:
             try:
                 m = selection[self.mask_variable].values.astype(np.float32)
@@ -446,7 +459,10 @@ class NetCDFDataset(Dataset):
                 fm = raw_fill_masks[var_name]
 
             if var_name in self.scaling:
-                ch = self.scale_channel(arr, *self.scaling[var_name])
+                vmin, vmax = self.scaling[var_name]
+                if self._preprocessing:
+                    vmin, vmax = self._preprocessing.transform_scaling(var_name, vmin, vmax)
+                ch = self.scale_channel(arr, vmin, vmax)
             else:
                 ch = self.scale_channel(arr, float(np.nanmin(arr)), float(np.nanmax(arr)))
             channels.append(ch)
@@ -495,22 +511,22 @@ class NetCDFDataset(Dataset):
         time_count = _resolve_axis_count(sizes, dims, "time", self.time_indices)
         lat_count = len(self.lat_coords) if self.lat_coords else 0
         lon_count = len(self.lon_coords) if self.lon_coords else 0
-        
+
         if lat_count == 0 or lon_count == 0:
             ds.close()
             return self._get_dummy_sample()
-            
+
         # Calculate which combination this index corresponds to
         lat_lon_count = lat_count * lon_count
         time_idx_in_file = local_idx // lat_lon_count
         lon_lat_idx_in_file = local_idx % lat_lon_count
         lat_idx_in_file = lon_lat_idx_in_file // lon_count
         lon_idx_in_file = lon_lat_idx_in_file % lon_count
-        
+
         # Get actual coordinate values
         lat_coord = self.lat_coords[lat_idx_in_file] if self.lat_coords else 0
         lon_coord = self.lon_coords[lon_idx_in_file] if self.lon_coords else 0
-        
+
         # Build selection for xarray
         sel_kw = {}
         if self.time_indices is not None:
@@ -525,15 +541,15 @@ class NetCDFDataset(Dataset):
                                 ds["time"].isel(time=self.time_indices)
         else:
             sel_kw["time"] = ds["time"][time_idx_in_file] if time_idx_in_file < len(ds["time"]) else 0
-            
+
         # For depth, use all or specified indices
         if self.depth_indices is not None:
             sel_kw["depth"] = self.depth_indices
-            
+
         # Select the nearest latitude and longitude points
         sel_kw["latitude"] = lat_coord
         sel_kw["longitude"] = lon_coord
-        
+
         # Apply selection
         try:
             selection = ds.isel(sel_kw) if any(k in ["time", "depth"] for k in sel_kw.keys()) else ds
@@ -542,7 +558,7 @@ class NetCDFDataset(Dataset):
             logger.warning(f"Failed to select coordinates lat={lat_coord}, lon={lon_coord}: {e}")
             ds.close()
             return self._get_dummy_sample()
-        
+
         sliced_data = {}
         mask_arr = None
         for var_name in self.variables:
@@ -581,6 +597,9 @@ class NetCDFDataset(Dataset):
 
         ds.close()
 
+        if self._preprocessing and self._preprocessing.transforms:
+            sliced_data = self._preprocessing(sliced_data)
+
         channels = []
         for var_name in self.variables:
             arr = sliced_data[var_name]
@@ -590,9 +609,12 @@ class NetCDFDataset(Dataset):
             elif arr.ndim > 1:
                 # Flatten to 1D if needed (shouldn't happen for proper coordinate selection)
                 arr = arr.flatten()
-                
+
             if var_name in self.scaling:
-                ch = self.scale_channel(arr, *self.scaling[var_name])
+                vmin, vmax = self.scaling[var_name]
+                if self._preprocessing:
+                    vmin, vmax = self._preprocessing.transform_scaling(var_name, vmin, vmax)
+                ch = self.scale_channel(arr, vmin, vmax)
             else:
                 ch = self.scale_channel(arr, float(np.nanmin(arr)), float(np.nanmax(arr)))
             channels.append(ch)

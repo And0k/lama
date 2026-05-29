@@ -121,21 +121,27 @@ class DefaultInpaintingTrainingModule(BaseInpaintingTrainingModule):
             total_loss = total_loss + pl_value
             metrics['gen_pl'] = pl_value
 
-        # discriminator
-        # adversarial_loss calls backward by itself
-        mask_for_discr = supervised_mask if self.distance_weighted_mask_for_discr else original_mask
-        self.adversarial_loss.pre_generator_step(real_batch=img, fake_batch=predicted_img,
-                                                 generator=self.generator, discriminator=self.discriminator)
-        discr_real_pred, discr_real_features = self.discriminator(img)
-        discr_fake_pred, discr_fake_features = self.discriminator(predicted_img)
-        adv_gen_loss, adv_metrics = self.adversarial_loss.generator_loss(real_batch=img,
-                                                                         fake_batch=predicted_img,
-                                                                         discr_real_pred=discr_real_pred,
-                                                                         discr_fake_pred=discr_fake_pred,
-                                                                         mask=mask_for_discr)
-        total_loss = total_loss + adv_gen_loss
-        metrics['gen_adv'] = adv_gen_loss
-        metrics.update(add_prefix_to_keys(adv_metrics, 'adv_'))
+        # discriminator — skip forward pass entirely when both adversarial and
+        # feature matching are disabled (saves GPU memory and compute)
+        need_discr = (self.config.losses.adversarial.weight > 0
+                      or self.config.losses.feature_matching.weight > 0)
+        if need_discr:
+            mask_for_discr = supervised_mask if self.distance_weighted_mask_for_discr else original_mask
+            self.adversarial_loss.pre_generator_step(real_batch=img, fake_batch=predicted_img,
+                                                     generator=self.generator, discriminator=self.discriminator)
+            discr_real_pred, discr_real_features = self.discriminator(img)
+            discr_fake_pred, discr_fake_features = self.discriminator(predicted_img)
+
+        # adversarial loss
+        if self.config.losses.adversarial.weight > 0:
+            adv_gen_loss, adv_metrics = self.adversarial_loss.generator_loss(real_batch=img,
+                                                                             fake_batch=predicted_img,
+                                                                             discr_real_pred=discr_real_pred,
+                                                                             discr_fake_pred=discr_fake_pred,
+                                                                             mask=mask_for_discr)
+            total_loss = total_loss + adv_gen_loss
+            metrics['gen_adv'] = adv_gen_loss
+            metrics.update(add_prefix_to_keys(adv_metrics, 'adv_'))
 
         # feature matching
         if self.config.losses.feature_matching.weight > 0:

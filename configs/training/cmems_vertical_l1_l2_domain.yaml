@@ -48,3 +48,5 @@ defaults:
   - evaluator: default_inpainted
   - trainer: pl26_compat
   - hydra: overrides
+  - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog

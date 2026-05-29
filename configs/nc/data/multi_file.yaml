@@ -1,0 +1,34 @@
+# @package _group_
+# Multi-file time-series aggregation for NetCDF datasets.
+# Combines multiple NetCDF files into a unified time series with
+# automatic time coordinate alignment and deduplication.
+#
+# Use when:
+#   - You have daily/monthly split files covering a longer period
+#   - Files may have overlapping time coordinates
+#   - You want temporal sequences (pairs of consecutive time steps)
+
+batch_size: 4
+val_batch_size: 2
+num_workers: 0
+
+dataset:
+  _target_: netcdf.data.multi_file.MultiFileNetCDFDataset
+  filepaths: []  # Override with your NetCDF file paths
+  variables: ["thetao", "so"]
+  scaling:
+    thetao: [-3.0, 40.0]
+    so: [0.0, 40.0]
+  time_axis: "time"       # Name of the time dimension
+  deduplicate: true        # Remove duplicate time steps across files
+  sequence_length: 1       # 1 = single frames; >1 = temporal sequences of N consecutive frames
+  time_indices: null
+  depth_indices: null
+  slice_mode: null
+  coverage_threshold: 0.0
+  fill_ratio_threshold: 1.0
+
+dataloader_kwargs:
+  batch_size: ${nc.data.batch_size}
+  shuffle: true
+  num_workers: ${nc.data.num_workers}

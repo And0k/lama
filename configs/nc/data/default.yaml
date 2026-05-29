@@ -20,8 +20,8 @@ dataset:
     sob: [0.0, 40.0]
   time_indices: null   # Use all available (or: 0, [0,1,2], ${slice:0,10})
   depth_indices: null  # Use all available (or: 0, [0,1,2], ${slice:0,10})
-  lat_indices: null    # Use for time_lat mode; select specific latitude index
-  lon_indices: null    # Use for time_lon mode; select specific longitude index
+  lat_indices: null    # Used with slice_mode=["time", "latitude"]
+  lon_indices: null    # Used with slice_mode=["time", "longitude"]
   slice_mode: null     # Slicing mode: null (default lat×lon), ["time", "depth"], ["time", "latitude"], ["time", "longitude"]
   mask_variable: null  # For inference with pre-existing mask variable
   mask_generator:  # For training with random masks
