@@ -16,9 +16,6 @@ dataset:
   _target_: netcdf.data.multi_file.MultiFileNetCDFDataset
   filepaths: []  # Override with your NetCDF file paths
   variables: ["thetao", "so"]
-  scaling:
-    thetao: [-3.0, 40.0]
-    so: [0.0, 40.0]
   time_axis: "time"       # Name of the time dimension
   deduplicate: true        # Remove duplicate time steps across files
   sequence_length: 1       # 1 = single frames; >1 = temporal sequences of N consecutive frames

@@ -5,4 +5,8 @@ lpips: false
 fid: false
 rmse: true
 correlation: true
+stability_violation: true
+bbl_gradient: true
+domain_rmse: true
+oi_baseline: false   # requires scipy; enable for benchmark vs OI
 integral_kind: null

@@ -3,6 +3,12 @@
 
 run_title: "cmems_vertical_l1_l2_domain"
 
+# Reproducibility: set to an integer to enable deterministic training.
+# When set, seed_everything(seed) is called before training starts,
+# making RNG states for Python, NumPy, and PyTorch all deterministic.
+# DataLoader shuffle order is also seeded.  Set to null to disable.
+seed: 42
+
 training_model:
   kind: default
   visualize_each_iters: 500
@@ -40,6 +46,18 @@ losses:
         - [0.0, 1.0]   # so (salinity)
     gradient:
       weight: 0.1
+    # Physics-motivated losses ported from lama_hydro_simple_end2end/train.py
+    stability:
+      weight: 0.3
+      channel_index: 1     # thetao channel index in the multi-channel tensor
+      alpha: 0.25          # thermal expansion coefficient for linearized EOS
+    bbl:
+      weight: 0.2
+      channel_index: 1     # thetao channel index
+    observation_mse:
+      weight: 1.0
+      weight_known: 1.0    # MSE weight in observed (CTD+CMEMS) pixels
+      weight_domain: 0.1   # MSE weight in valid domain pixels
 
 defaults:
   - location: docker

@@ -178,6 +178,40 @@ class DefaultInpaintingTrainingModule(BaseInpaintingTrainingModule):
             total_loss = total_loss + gr_val
             metrics['gen_grad'] = gr_val
 
+        # Physics-motivated losses from lama_hydro_simple_end2end
+        if "stability" in self.domain_losses:
+            dl = self.domain_losses["stability"]
+            st_val = dl["fn"](predicted_img,
+                              channel_index=dl["channel_index"],
+                              below_mask=original_mask,
+                              alpha=dl["alpha"]) * dl["weight"]
+            total_loss = total_loss + st_val
+            metrics['gen_stability'] = st_val
+
+        if "bbl" in self.domain_losses:
+            dl = self.domain_losses["bbl"]
+            # bathy_indices expected in batch meta; skip if not available
+            bathy_indices = batch.get("bathy_indices", None)
+            if bathy_indices is not None:
+                bbl_val = dl["fn"](predicted_img,
+                                   bathy_indices=bathy_indices,
+                                   channel_index=dl["channel_index"]) * dl["weight"]
+                total_loss = total_loss + bbl_val
+                metrics['gen_bbl'] = bbl_val
+
+        if "observation_mse" in self.domain_losses:
+            dl = self.domain_losses["observation_mse"]
+            # obs_mask expected in batch; skip if not available
+            obs_mask = batch.get("obs_mask", None)
+            if obs_mask is not None:
+                om_val = dl["fn"](predicted_img, img,
+                                  obs_mask=obs_mask,
+                                  below_mask=original_mask,
+                                  weight_known=dl["weight_known"],
+                                  weight_domain=dl["weight_domain"]) * dl["weight"]
+                total_loss = total_loss + om_val
+                metrics['gen_obs_mse'] = om_val
+
         return total_loss, metrics
 
     def discriminator_loss(self, batch):

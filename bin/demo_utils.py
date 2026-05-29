@@ -18,13 +18,18 @@ log = logging.getLogger(__name__)
 def _create_demo_nc(path: str) -> str:
     """Write a synthetic 4-D NetCDF file used when no real data is found.
 
-    Generates realistic shallow sea oceanographic data:
-    - Temperature decreases with depth (thermocline ~20m)
-    - Salinity stratified
-    - Velocity fields with spatial patterns
+    Uses enhanced generators from ``netcdf.data.synthetic`` to produce
+    physically-motivated oceanographic data with thermocline, halocline,
+    and geostrophic velocity patterns.
+
+    For each time step, a depth×longitude cross-section is generated with
+    a seeded RNG, then tiled across latitude.
     """
+    from netcdf.data.synthetic import synthetic_TS_field, synthetic_V_field
+
     T, D, H, W = 4, 24, 96, 128
     rng = np.random.RandomState(0)
+
     ds = xr.Dataset(
         {},
         coords={
@@ -35,29 +40,51 @@ def _create_demo_nc(path: str) -> str:
         },
     )
 
-    # Temperature: surface warm (~20°C), decreases to ~4°C at depth (shallow sea thermocline)
-    depth_temps = np.linspace(20, 4, D).astype(np.float32)
-    base_temp = depth_temps[:, None, None] * np.ones((D, H, W), dtype=np.float32)
-    noise_temp = rng.uniform(-2, 2, (T, D, H, W)).astype(np.float32)
-    ds["thetao"] = (("time", "depth", "latitude", "longitude"), base_temp + noise_temp)
+    # Physical scaling ranges (matching configs/nc/scaling/default.yaml)
+    T_min, T_max = -3.0, 40.0   # thetao °C
+    S_min, S_max = 0.0, 40.0    # so PSU
+    V_min, V_max = -2.0, 2.0    # uo, vo m/s
+
+    thetao = np.empty((T, D, H, W), dtype=np.float32)
+    so = np.empty((T, D, H, W), dtype=np.float32)
+    uo = np.empty((T, D, H, W), dtype=np.float32)
+    vo = np.empty((T, D, H, W), dtype=np.float32)
+
+    for t in range(T):
+        seed_t = rng.randint(0, 2**31)
+        sub_rng = np.random.RandomState(seed_t)
+
+        # Generate depth×longitude cross-sections in [0,1]
+        T_norm, S_norm = synthetic_TS_field(
+            W, D, np.random.default_rng(seed_t)
+        )
+        V_norm = synthetic_V_field(W, D, T_norm, np.random.default_rng(seed_t + 2))
+
+        # Convert from [0,1] to physical units
+        T_phys = T_norm * (T_max - T_min) + T_min
+        S_phys = S_norm * (S_max - S_min) + S_min
+        V_phys = V_norm * (V_max - V_min) + V_min
+
+        # Tile across latitude (each lat gets the same cross-section + small noise)
+        for h in range(H):
+            noise = sub_rng.uniform(-0.5, 0.5, (D, W)).astype(np.float32)
+            thetao[t, :, h, :] = T_phys + noise
+            so[t, :, h, :] = S_phys + sub_rng.uniform(-0.3, 0.3, (D, W)).astype(np.float32)
+            uo[t, :, h, :] = V_phys * np.cos(sub_rng.uniform(0, 2 * np.pi))
+            vo[t, :, h, :] = V_phys * np.sin(sub_rng.uniform(0, 2 * np.pi))
+
+    ds["thetao"] = (("time", "depth", "latitude", "longitude"), thetao)
     ds["thetao"].attrs["_FillValue"] = -999.0
     ds["thetao"].attrs["units"] = "degC"
 
-    # Salinity: surface lower (~30 PSU), increases with depth
-    depth_so = np.linspace(30, 35, D).astype(np.float32)
-    base_so = depth_so[:, None, None] * np.ones((D, H, W), dtype=np.float32)
-    noise_so = rng.uniform(-1, 1, (T, D, H, W)).astype(np.float32)
-    ds["so"] = (("time", "depth", "latitude", "longitude"), base_so + noise_so)
+    ds["so"] = (("time", "depth", "latitude", "longitude"), so)
     ds["so"].attrs["_FillValue"] = -999.0
     ds["so"].attrs["units"] = "PSU"
 
-    # Velocity: horizontal with weak vertical shear
-    uo = rng.uniform(-0.5, 0.5, (T, D, H, W)).astype(np.float32)
     ds["uo"] = (("time", "depth", "latitude", "longitude"), uo)
     ds["uo"].attrs["_FillValue"] = -999.0
     ds["uo"].attrs["units"] = "m s-1"
 
-    vo = rng.uniform(-0.5, 0.5, (T, D, H, W)).astype(np.float32)
     ds["vo"] = (("time", "depth", "latitude", "longitude"), vo)
     ds["vo"].attrs["_FillValue"] = -999.0
     ds["vo"].attrs["units"] = "m s-1"

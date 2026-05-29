@@ -22,6 +22,11 @@ OUTPUT_DIR = "/content/drive/MyDrive/lama_nc_output"
 PRETRAINED_CKPT = None   # e.g. "/content/drive/MyDrive/big-lama/models/best.ckpt"
 RESUME_FROM_CHECKPOINT = None   # None → auto-detect last.ckpt
 
+# Reproducibility seed.  Set to an integer to get deterministic data order,
+# mask generation, and weight initialisation across runs.  Set to None to
+# disable (faster but non-reproducible).
+SEED = 42
+
 MAX_EPOCHS = 40
 BATCH_SIZE = 2
 ADVERSARIAL_WEIGHT = 0          # 0 = Phase 1 (reconstruction-only)
@@ -93,13 +98,8 @@ _nc_file = NC_FILE_PATH
 _is_synthetic = False
 
 if not os.path.isfile(_nc_file):
-    from bin.demo_utils import _create_demo_nc
-
-    _demo_dir = tempfile.mkdtemp(prefix="netcdf_train_")
-    _nc_file = os.path.join(_demo_dir, "demo.nc")
-    _create_demo_nc(_nc_file)
     _is_synthetic = True
-    log.info("NC file not found — created synthetic demo at %s", _nc_file)
+    log.info("NC file not found — will use in-memory SyntheticOceanDataset")
 
 # Redirect Drive-based output to /tmp when running locally
 if not _is_colab and OUTPUT_DIR.startswith("/content/drive"):
@@ -114,6 +114,14 @@ from netcdf.config import load_nc_training_config, detect_precision
 config = load_nc_training_config(os.path.join(REPO_DIR, "configs"))
 _precision = detect_precision()
 
+# ── Reproducibility ─────────────────────────────────────────────
+if SEED is not None:
+    import pytorch_lightning as pl
+    pl.seed_everything(SEED, workers=True)
+    log.info("Seed:           %d (deterministic mode)", SEED)
+else:
+    log.info("Seed:           None (non-deterministic)")
+
 # ── Output directories ─────────────────────────────────────────
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 tb_dir = os.path.join(OUTPUT_DIR, "tb_logs")
@@ -124,17 +132,21 @@ for d in (tb_dir, checkpoints_dir, samples_dir):
 
 # ── Dataset sizing (synthetic vs real) ─────────────────────────
 if _is_synthetic:
-    _lat_indices = "${slice:10,50}"
-    _lon_indices = None
-    _n_samples = 160     # T=4 × lat=40
+    _n_samples_train = 400
+    _n_samples_val = 80
     _run_title = "synthetic_demo"
+    _synth_cfg = dict(
+        nx=64, nz=64, n_ctd=5, n_cmems_x=8,
+        noise_ctd=0.05, noise_cmems=0.10,
+    )
 else:
     _lat_indices = "${slice:48,126}"
     _lon_indices = "${slice:141,365}"
-    _n_samples = 4836    # T=62 × lat=78
+    _n_samples_train = 4836    # T=62 × lat=78
+    _n_samples_val = 4836
     _run_title = "cmems_vertical_nc"
 
-_steps_per_epoch = _n_samples // BATCH_SIZE
+_steps_per_epoch = _n_samples_train // BATCH_SIZE
 
 # ── Apply overrides ────────────────────────────────────────────
 config.run_title = _run_title
@@ -144,11 +156,12 @@ config.losses.adversarial.weight = ADVERSARIAL_WEIGHT
 config.losses.feature_matching.weight = FEATURE_MATCHING_WEIGHT
 config.losses.resnet_pl.weight = 0
 
-config.data.nc.data.batch_size = BATCH_SIZE
-config.data.nc.data.num_workers = 0
-config.data.nc.data.dataset.filepaths = [_nc_file]
-config.data.nc.data.dataset.lat_indices = _lat_indices
-config.data.nc.data.dataset.lon_indices = _lon_indices
+if not _is_synthetic:
+    config.data.nc.data.batch_size = BATCH_SIZE
+    config.data.nc.data.num_workers = 0
+    config.data.nc.data.dataset.filepaths = [_nc_file]
+    config.data.nc.data.dataset.lat_indices = _lat_indices
+    config.data.nc.data.dataset.lon_indices = _lon_indices
 
 # Replace trainer kwargs entirely — the YAML has PL 1.x / DDP keys
 # (gpus, accelerator=ddp, gradient_clip_val, …) that crash PL 2.6.
@@ -167,7 +180,7 @@ config.trainer.checkpoint_kwargs.pop("period", None)   # PL 2.6: use every_n_epo
 
 config.location.tb_dir = tb_dir
 config.location.out_root_dir = OUTPUT_DIR
-config.location.data_root_dir = os.path.dirname(_nc_file)
+config.location.data_root_dir = os.path.dirname(_nc_file) if _nc_file else OUTPUT_DIR
 
 config.visualizer.outdir = samples_dir
 config.visualizer.key_order = ["image", "predicted_image", "inpainted"]
@@ -178,8 +191,8 @@ config.visualizer.rescale_keys = []
 # lazily when values are accessed.
 
 log.info("─" * 50)
-log.info("Mode:           %s", "SYNTHETIC DEMO" if _is_synthetic else "REAL DATA")
-log.info("NC file:        %s", _nc_file)
+log.info("Mode:           %s", "SYNTHETIC (in-memory)" if _is_synthetic else "REAL DATA")
+log.info("NC file:        %s", _nc_file if _nc_file else "N/A (in-memory)")
 log.info("Output dir:     %s", OUTPUT_DIR)
 log.info("Steps/epoch:    %s", _steps_per_epoch)
 log.info("Max epochs:     %s", MAX_EPOCHS)
@@ -258,13 +271,35 @@ trainer = pl.Trainer(
     **trainer_kwargs,
 )
 
+# ── Synthetic dataloaders (in-memory, no NetCDF) ──────────────
+_train_dl = None
+_val_dl = None
+
+if _is_synthetic:
+    from torch.utils.data import DataLoader
+    from netcdf.data.synthetic_dataset import SyntheticOceanDataset
+
+    _synth_seed = SEED if SEED is not None else 42
+    train_ds = SyntheticOceanDataset(
+        n=_n_samples_train, seed=_synth_seed, **_synth_cfg
+    )
+    val_ds = SyntheticOceanDataset(
+        n=_n_samples_val, seed=_synth_seed + 100, **_synth_cfg
+    )
+    _train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
+                           num_workers=0, pin_memory=True)
+    _val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
+                         num_workers=0, pin_memory=True)
+    log.info("Synthetic train: %d samples, val: %d samples", len(train_ds), len(val_ds))
+
 log.info("─" * 50)
 log.info("Starting: %d epochs × %d steps/epoch = %d total",
          MAX_EPOCHS, _steps_per_epoch, MAX_EPOCHS * _steps_per_epoch)
 log.info("Checkpoints → %s", checkpoints_dir)
 log.info("TensorBoard → %s", os.path.join(tb_dir, "nc_training", TB_VERSION))
 
-trainer.fit(model, ckpt_path=_resume_ckpt, weights_only=False)
+trainer.fit(model, train_dataloaders=_train_dl, val_dataloaders=_val_dl,
+            ckpt_path=_resume_ckpt)
 
 log.info("─" * 50)
 log.info("Training complete!")

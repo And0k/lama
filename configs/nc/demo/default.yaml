@@ -5,6 +5,9 @@ defaults:
   - _self_
 
 # Scaling overrides: add |V|, keep all others from the data default
+# CAUTION: these MUST match configs/nc/scaling/cmems_baltic.yaml exactly.
+# Changing values here without updating the scaling YAML will cause silent
+# normalization inconsistency between training and inference.
 scaling:
   "|V|": ~    # computed at runtime from uo/vo if None
   thetao: [-2.0, 22.0]  # Temperature: surface ~20°C, bottom ~4°C

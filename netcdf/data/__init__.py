@@ -27,6 +27,13 @@ from .coordinates import (
 )
 from ..mask_generator import generate_mask
 from ..visualization import visualize_sample, plot_comparison
+from .synthetic import (
+    synthetic_TS_field,
+    synthetic_V_field,
+    sloping_bathymetry,
+    make_synthetic_sample,
+)
+from .synthetic_dataset import SyntheticOceanDataset
 
 __all__ = [
     'load_netcdf',
@@ -54,4 +61,9 @@ __all__ = [
     'generate_vertical_mask',
     'visualize_sample',
     'plot_comparison',
+    'synthetic_TS_field',
+    'synthetic_V_field',
+    'sloping_bathymetry',
+    'make_synthetic_sample',
+    'SyntheticOceanDataset',
 ]

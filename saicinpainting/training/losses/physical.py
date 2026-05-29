@@ -2,6 +2,11 @@
 
 Provides spatial regularization and physical constraint losses that
 encourage physically plausible reconstructions of ocean fields.
+
+Physics-motivated losses (ported from bin/lama_hydro_simple_end2end/train.py):
+    hydrostatic_stability_loss: penalizes density inversions (∂ρ/∂z < 0)
+    bottom_boundary_layer_loss: penalizes non-zero vertical gradient at bottom
+    observation_weighted_mse: MSE weighted by observation mask + domain mask
 """
 
 import torch
@@ -110,3 +115,118 @@ def gradient_consistency_loss(pred, target=None, mask=None, weight=1.0):
         diff = diff * (1 - mask_cropped)
 
     return weight * diff.mean()
+
+
+# ── Physics-motivated losses from lama_hydro_simple_end2end ────────────
+
+
+def hydrostatic_stability_loss(pred, channel_index=1, below_mask=None,
+                                alpha=0.25, weight=1.0):
+    """Penalize density inversions (hydrostatic instability).
+
+    In a stably stratified ocean, density must increase with depth:
+        ∂ρ/∂z ≥ 0.
+    Using a linearized equation of state  ρ ≈ 1 - α·T_norm  (with T_norm
+    in [0, 1]), this is equivalent to  ∂T/∂z ≤ 0.  Any positive vertical
+    temperature gradient (warmer water below cooler water) indicates an
+    unstable density inversion.
+
+    Central finite difference is used for the vertical derivative (axis 2).
+
+    Args:
+        pred:         (B, C, H, W) predicted field in [0, 1].
+        channel_index: int, index of the temperature channel in dim 1.
+        below_mask:   (B, 1, H, W) float mask, 1.0 below bottom (outside
+                      domain), 0.0 above.  If None, no masking is applied.
+        alpha:        float, thermal expansion coefficient for linearized EOS.
+                      Only affects the sign; the loss penalizes dT/dz > 0
+                      regardless of alpha value.
+        weight:       scalar multiplier.
+
+    Returns:
+        Scalar loss.
+    """
+    T = pred[:, channel_index:channel_index + 1, :, :]  # (B, 1, H, W)
+
+    # Central difference: dT/dz at interior points
+    dT_dz = T[:, :, 2:, :] - T[:, :, :-2, :]  # (B, 1, H-2, W)
+
+    if below_mask is not None:
+        domain = 1.0 - below_mask
+        mask = domain[:, :, 2:, :] * domain[:, :, :-2, :]
+    else:
+        mask = 1.0
+
+    # Only penalize positive dT/dz (warm water below cold = unstable)
+    instability = F.relu(dT_dz)
+    return weight * (instability * mask).mean()
+
+
+def bottom_boundary_layer_loss(pred, bathy_indices, channel_index=1,
+                                weight=1.0):
+    """Penalize non-zero vertical temperature gradient near the bottom.
+
+    In the bottom boundary layer (BBL), turbulent mixing homogenizes
+    temperature, so dT/dz → 0 at the seafloor.  This loss penalizes
+    the squared difference between the temperature at the last two
+    grid cells above the bottom.
+
+    Args:
+        pred:          (B, C, H, W) predicted field in [0, 1].
+        bathy_indices: (B, W) int tensor of bottom depth indices (in grid
+                       cells).  Values ≤ 1 are skipped (too shallow).
+        channel_index: int, index of the temperature channel in dim 1.
+        weight:        scalar multiplier.
+
+    Returns:
+        Scalar loss.
+    """
+    T = pred[:, channel_index]  # (B, H, W)
+    B, H, W = T.shape
+
+    total = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+    count = 0
+
+    for bi in range(B):
+        for xi in range(W):
+            zi = int(bathy_indices[bi, xi].item()) - 2
+            if 1 < zi < H - 1:
+                dT = T[bi, zi, xi] - T[bi, zi - 1, xi]
+                total = total + dT ** 2
+                count += 1
+
+    return weight * total / max(count, 1)
+
+
+def observation_weighted_mse(pred, target, obs_mask, below_mask=None,
+                              weight_known=1.0, weight_domain=0.1,
+                              weight=1.0):
+    """MSE weighted by observation and domain masks.
+
+    Two-term loss:
+        L = weight_known  · MSE(pred, target) in observed pixels
+          + weight_domain · MSE(pred, target) in domain (above bottom)
+
+    Args:
+        pred:         (B, C, H, W) predicted field.
+        target:       (B, C, H, W) target field.
+        obs_mask:     (B, 1, H, W) float mask, 1.0 at observation locations
+                      (CTD + CMEMS), 0.0 elsewhere.
+        below_mask:   (B, 1, H, W) float mask, 1.0 below bottom (outside
+                      domain), 0.0 above.  If None, domain = 1 everywhere.
+        weight_known: multiplier for the observation-term MSE.
+        weight_domain: multiplier for the domain-term MSE.
+        weight:       scalar multiplier for the total.
+
+    Returns:
+        Scalar loss.
+    """
+    if below_mask is not None:
+        domain = 1.0 - below_mask
+    else:
+        domain = torch.ones_like(obs_mask)
+
+    l_obs = F.mse_loss(pred * obs_mask, target * obs_mask)
+    l_dom = F.mse_loss(pred * domain, target * domain)
+
+    return weight * (weight_known * l_obs + weight_domain * l_dom)

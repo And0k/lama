@@ -16,15 +16,19 @@ dataset:
     "|V|":
       inputs: ["uo", "vo"]
       operation: velocity_magnitude
+  # Physical ranges for [0,1] normalisation.
+  # CAUTION: these are overridden at runtime by the scaling YAML loaded in
+  # netcdf/config.py (see configs/nc/scaling/cmems_baltic.yaml).
+  # The values here are kept for reference and Hydra-based runs.
   scaling:
     "|V|": [0.0, 2.5]
     thetao: [-2.0, 22.0]
-    so: [29.0, 36.0]
+    so: [5.0, 35.0]
     uo: [-2.0, 2.0]
     vo: [-2.0, 2.0]
     wo: [-0.5, 0.5]
     bottomT: [-2.0, 22.0]
-    sob: [29.0, 36.0]
+    sob: [5.0, 35.0]
   time_indices: null
   depth_indices: null
   # lat[48]=54.82N to lat[125]=56.11N — best fill ratio region (~60% valid cells)

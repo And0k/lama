@@ -11,6 +11,10 @@ dataset:
   filepaths: []  # Override with your NetCDF file paths (e.g., /path/to/file.nc)
   variables: ["thetao", "so", "uo"]  # Channels: Temperature, Salinity, Zonal velocity
   scaling:  # Physical ranges for [0,1] normalisation (vmin, vmax)
+    # CAUTION: these are overridden at runtime by the scaling YAML loaded in
+    # netcdf/config.py (see configs/nc/scaling/).  Changing values here
+    # without updating the scaling YAML will cause silent normalization
+    # inconsistency between training and inference.
     thetao: [-3.0, 40.0]
     so: [0.0, 40.0]
     uo: [-2.0, 2.0]

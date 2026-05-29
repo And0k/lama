@@ -138,6 +138,33 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
                     "weight": domain_cfg.gradient.weight,
                 }
 
+            # Physics-motivated losses from lama_hydro_simple_end2end
+            if domain_cfg.get("stability", {}).get("weight", 0) > 0:
+                from saicinpainting.training.losses.physical import hydrostatic_stability_loss
+                self.domain_losses["stability"] = {
+                    "fn": hydrostatic_stability_loss,
+                    "weight": domain_cfg.stability.weight,
+                    "channel_index": domain_cfg.stability.get("channel_index", 1),
+                    "alpha": domain_cfg.stability.get("alpha", 0.25),
+                }
+
+            if domain_cfg.get("bbl", {}).get("weight", 0) > 0:
+                from saicinpainting.training.losses.physical import bottom_boundary_layer_loss
+                self.domain_losses["bbl"] = {
+                    "fn": bottom_boundary_layer_loss,
+                    "weight": domain_cfg.bbl.weight,
+                    "channel_index": domain_cfg.bbl.get("channel_index", 1),
+                }
+
+            if domain_cfg.get("observation_mse", {}).get("weight", 0) > 0:
+                from saicinpainting.training.losses.physical import observation_weighted_mse
+                self.domain_losses["observation_mse"] = {
+                    "fn": observation_weighted_mse,
+                    "weight": domain_cfg.observation_mse.weight,
+                    "weight_known": domain_cfg.observation_mse.get("weight_known", 1.0),
+                    "weight_domain": domain_cfg.observation_mse.get("weight_domain", 0.1),
+                }
+
         self.visualize_each_iters = visualize_each_iters
         self._val_outputs = []
         LOGGER.info('BaseInpaintingTrainingModule init done')

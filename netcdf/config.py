@@ -23,7 +23,10 @@ def _load(relpath: str, configs_dir: str) -> DictConfig:
     return cfg
 
 
-def load_nc_training_config(configs_dir: str) -> DictConfig:
+def load_nc_training_config(
+    configs_dir: str,
+    scaling_name: str = "cmems_baltic",
+) -> DictConfig:
     """Compose the full NC training config from YAML files.
 
     Mirrors the Hydra ``defaults`` composition of
@@ -33,6 +36,10 @@ def load_nc_training_config(configs_dir: str) -> DictConfig:
 
     Args:
         configs_dir: Absolute path to ``configs/`` directory.
+        scaling_name: Name of the scaling YAML under ``configs/nc/scaling/``
+            (without extension).  Default ``"cmems_baltic"`` loads
+            ``configs/nc/scaling/cmems_baltic.yaml`` as the single
+            source of truth for normalization ranges.
 
     Returns:
         Composed OmegaConf DictConfig ready for ``make_training_model()``.
@@ -50,6 +57,14 @@ def load_nc_training_config(configs_dir: str) -> DictConfig:
     # Data config nested under data.nc.data (matches base.py access pattern)
     data_cfg = _load("nc/data/cmems_vertical.yaml", configs_dir)
     data_cfg.pop("dataloader_kwargs", None)   # references ${nc.data.batch_size} — wrong path outside Hydra
+
+    # Load scaling from the single-source-of-truth YAML and inject into
+    # dataset config.  This overrides any inline scaling in the data YAML
+    # so that training and inference always use the same ranges.
+    scaling_cfg = _load(f"nc/scaling/{scaling_name}.yaml", configs_dir)
+    data_cfg.dataset.scaling = scaling_cfg
+    log.info("Scaling loaded from nc/scaling/%s.yaml", scaling_name)
+
     config.data = OmegaConf.create({"nc": {"data": data_cfg}})
 
     config.visualizer = _load("training/visualizer/directory.yaml", configs_dir)
