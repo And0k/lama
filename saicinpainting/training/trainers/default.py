@@ -56,16 +56,20 @@ class DefaultInpaintingTrainingModule(BaseInpaintingTrainingModule):
         img = batch['image']
         mask = batch['mask']
 
-        masked_img = img * (1 - mask)
+        # Hydro pipeline: 8-channel pre-baked input with separate target
+        if 'hydro_input' in batch:
+            masked_img = batch['hydro_input']
+        else:
+            masked_img = img * (1 - mask)
 
-        if self.add_noise_kwargs is not None:
-            noise = make_multiscale_noise(masked_img, **self.add_noise_kwargs)
-            if self.noise_fill_hole:
-                masked_img = masked_img + mask * noise[:, :masked_img.shape[1]]
-            masked_img = torch.cat([masked_img, noise], dim=1)
+            if self.add_noise_kwargs is not None:
+                noise = make_multiscale_noise(masked_img, **self.add_noise_kwargs)
+                if self.noise_fill_hole:
+                    masked_img = masked_img + mask * noise[:, :masked_img.shape[1]]
+                masked_img = torch.cat([masked_img, noise], dim=1)
 
-        if self.concat_mask:
-            masked_img = torch.cat([masked_img, mask], dim=1)
+            if self.concat_mask:
+                masked_img = torch.cat([masked_img, mask], dim=1)
 
         orig_h, orig_w = masked_img.shape[2], masked_img.shape[3]
         pad_h = (8 - orig_h % 8) % 8
@@ -75,25 +79,29 @@ class DefaultInpaintingTrainingModule(BaseInpaintingTrainingModule):
         batch['predicted_image'] = self.generator(masked_img)
         if pad_h > 0 or pad_w > 0:
             batch['predicted_image'] = batch['predicted_image'][:, :, :orig_h, :orig_w]
-        batch['inpainted'] = mask * batch['predicted_image'] + (1 - mask) * batch['image']
+
+        # For hydro pipeline: target is 2ch [T,S], image is 8ch input
+        target = batch.get('target', img)
+        batch['inpainted'] = mask * batch['predicted_image'] + (1 - mask) * target
 
         if self.fake_fakes_proba > 1e-3:
             if self.training and torch.rand(1).item() < self.fake_fakes_proba:
-                batch['fake_fakes'], batch['fake_fakes_masks'] = self.fake_fakes_gen(img, mask)
+                batch['fake_fakes'], batch['fake_fakes_masks'] = self.fake_fakes_gen(target, mask)
                 batch['use_fake_fakes'] = True
             else:
-                batch['fake_fakes'] = torch.zeros_like(img)
+                batch['fake_fakes'] = torch.zeros_like(target)
                 batch['fake_fakes_masks'] = torch.zeros_like(mask)
                 batch['use_fake_fakes'] = False
 
-        batch['mask_for_losses'] = self.refine_mask_for_losses(img, batch['predicted_image'], mask) \
+        batch['mask_for_losses'] = self.refine_mask_for_losses(target, batch['predicted_image'], mask) \
             if self.refine_mask_for_losses is not None and self.training \
             else mask
 
         return batch
 
     def generator_loss(self, batch):
-        img = batch['image']
+        # Hydro pipeline: target is 2ch [T,S]; standard pipeline: target = image
+        img = batch.get('target', batch['image'])
         predicted_img = batch[self.image_to_discriminator]
         original_mask = batch['mask']
         supervised_mask = batch['mask_for_losses']
@@ -184,24 +192,25 @@ class DefaultInpaintingTrainingModule(BaseInpaintingTrainingModule):
             st_val = dl["fn"](predicted_img,
                               channel_index=dl["channel_index"],
                               below_mask=original_mask,
-                              alpha=dl["alpha"]) * dl["weight"]
+                              alpha=dl["alpha"],
+                              beta=dl["beta"],
+                              salinity_index=dl.get("salinity_index")) * dl["weight"]
             total_loss = total_loss + st_val
             metrics['gen_stability'] = st_val
 
         if "bbl" in self.domain_losses:
             dl = self.domain_losses["bbl"]
-            # bathy_indices expected in batch meta; skip if not available
             bathy_indices = batch.get("bathy_indices", None)
             if bathy_indices is not None:
                 bbl_val = dl["fn"](predicted_img,
                                    bathy_indices=bathy_indices,
-                                   channel_index=dl["channel_index"]) * dl["weight"]
+                                   channel_index=dl["channel_index"],
+                                   salinity_index=dl.get("salinity_index")) * dl["weight"]
                 total_loss = total_loss + bbl_val
                 metrics['gen_bbl'] = bbl_val
 
         if "observation_mse" in self.domain_losses:
             dl = self.domain_losses["observation_mse"]
-            # obs_mask expected in batch; skip if not available
             obs_mask = batch.get("obs_mask", None)
             if obs_mask is not None:
                 om_val = dl["fn"](predicted_img, img,
@@ -212,18 +221,43 @@ class DefaultInpaintingTrainingModule(BaseInpaintingTrainingModule):
                 total_loss = total_loss + om_val
                 metrics['gen_obs_mse'] = om_val
 
+        if "inverse_variance_mse" in self.domain_losses:
+            dl = self.domain_losses["inverse_variance_mse"]
+            sigma = batch.get("sigma_obs", None)
+            obs_mask = batch.get("obs_mask", None)
+            if sigma is not None and obs_mask is not None:
+                iv_val = dl["fn"](predicted_img, img,
+                                  sigma=sigma,
+                                  obs_mask=obs_mask,
+                                  below_mask=original_mask,
+                                  weight_domain=dl["weight_domain"]) * dl["weight"]
+                total_loss = total_loss + iv_val
+                metrics['gen_inv_var'] = iv_val
+
+        if "geostrophic" in self.domain_losses:
+            dl = self.domain_losses["geostrophic"]
+            u_input = batch.get("u_input", None)
+            if u_input is not None:
+                geo_val = dl["fn"](predicted_img,
+                                   u_input=u_input,
+                                   below_mask=original_mask) * dl["weight"]
+                total_loss = total_loss + geo_val
+                metrics['gen_geostrophic'] = geo_val
+
         return total_loss, metrics
 
     def discriminator_loss(self, batch):
         total_loss = 0
         metrics = {}
 
+        # Hydro pipeline: discriminator operates on target (2ch), not image (8ch)
+        real_img = batch.get('target', batch['image'])
         predicted_img = batch[self.image_to_discriminator].detach()
-        self.adversarial_loss.pre_discriminator_step(real_batch=batch['image'], fake_batch=predicted_img,
+        self.adversarial_loss.pre_discriminator_step(real_batch=real_img, fake_batch=predicted_img,
                                                      generator=self.generator, discriminator=self.discriminator)
-        discr_real_pred, discr_real_features = self.discriminator(batch['image'])
+        discr_real_pred, discr_real_features = self.discriminator(real_img)
         discr_fake_pred, discr_fake_features = self.discriminator(predicted_img)
-        adv_discr_loss, adv_metrics = self.adversarial_loss.discriminator_loss(real_batch=batch['image'],
+        adv_discr_loss, adv_metrics = self.adversarial_loss.discriminator_loss(real_batch=real_img,
                                                                                fake_batch=predicted_img,
                                                                                discr_real_pred=discr_real_pred,
                                                                                discr_fake_pred=discr_fake_pred,
@@ -235,11 +269,11 @@ class DefaultInpaintingTrainingModule(BaseInpaintingTrainingModule):
 
         if batch.get('use_fake_fakes', False):
             fake_fakes = batch['fake_fakes']
-            self.adversarial_loss.pre_discriminator_step(real_batch=batch['image'], fake_batch=fake_fakes,
+            self.adversarial_loss.pre_discriminator_step(real_batch=real_img, fake_batch=fake_fakes,
                                                          generator=self.generator, discriminator=self.discriminator)
             discr_fake_fakes_pred, _ = self.discriminator(fake_fakes)
             fake_fakes_adv_discr_loss, fake_fakes_adv_metrics = self.adversarial_loss.discriminator_loss(
-                real_batch=batch['image'],
+                real_batch=real_img,
                 fake_batch=fake_fakes,
                 discr_real_pred=discr_real_pred,
                 discr_fake_pred=discr_fake_fakes_pred,

@@ -4,12 +4,21 @@ Ported and enhanced from bin/lama_hydro_simple_end2end/train.py.
 Generates physically-motivated 2D cross-sections of temperature,
 salinity, and velocity fields for training without real NetCDF data.
 
+Two generation backends:
+    - Simple (sigmoid+eddy): ``make_synthetic_sample()`` — fast, minimal physics
+    - Baltic (SceneGenerator): ``make_hydro_synthetic_sample()`` — full climatology,
+      multiple scene types, seasonal variation, halocline/CIL physics
+
 All generators use a seeded ``np.random.Generator`` for strict
 reproducibility.
 """
+import logging
+
 import numpy as np
 from numpy.typing import NDArray
 from typing import Final, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 def _sigmoid(z: NDArray[np.float64], z0: float, k: float) -> NDArray[np.float64]:
     """Compute numerically stable sigmoid profile."""
@@ -211,4 +220,256 @@ def make_synthetic_sample(nx: int, nz: int, n_ctd: int, n_cmems_x: int,
         "fill_mask": fill_mask,
         "bathy": bathy,
         "below": below,
+    }
+
+
+# ── Hydro pipeline: Baltic SceneGenerator integration ──────────────────────
+
+
+def _normalize_field(field: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Min-max normalize to [0, 1], NaN/masked regions → 0.
+
+    Args:
+        field: (nz, nx) raw field with NaN below bottom.
+        mask:  (nz, nx) bool, True where water (valid).
+
+    Returns:
+        (nz, nx) float32 in [0, 1].
+    """
+    valid = field[mask]
+    if valid.size == 0:
+        return np.zeros_like(field, dtype=np.float32)
+    vmin, vmax = float(valid.min()), float(valid.max())
+    out = np.zeros_like(field, dtype=np.float32)
+    out[mask] = (field[mask] - vmin) / (vmax - vmin + 1e-8)
+    return out
+
+
+def sample_observations(
+    T: NDArray[np.float32],
+    S: NDArray[np.float32],
+    below: NDArray[np.bool_],
+    bathy: NDArray[np.float32],
+    nx: int,
+    nz: int,
+    n_ctd: int = 5,
+    n_cmems_x: int = 8,
+    n_cmems_z: int = 10,
+    noise_ctd: float = 0.05,
+    noise_cmems: float = 0.10,
+    rng: np.random.Generator | None = None,
+) -> Tuple[NDArray[np.float32], NDArray[np.float32],
+           NDArray[np.float32], NDArray[np.float32], NDArray[np.float32]]:
+    """Sample random observation positions and generate noisy values.
+
+    Generates CTD profiles (vertical lines at random x) and CMEMS
+    points (sparse log-spaced grid) with Gaussian measurement noise.
+
+    Args:
+        T: (nz, nx) ground truth temperature in [0, 1].
+        S: (nz, nx) ground truth salinity in [0, 1].
+        below: (nz, nx) bool, True below seabed.
+        bathy: (nx,) normalised bottom depth in [0, 1].
+        nx: Horizontal grid points.
+        nz: Vertical grid points.
+        n_ctd: Number of CTD profiles.
+        n_cmems_x: Number of CMEMS x-columns.
+        n_cmems_z: Number of CMEMS z-levels.
+        noise_ctd: CTD measurement noise σ.
+        noise_cmems: CMEMS measurement noise σ.
+        rng: Seeded NumPy generator.
+
+    Returns:
+        Tuple of (T_obs, S_obs, mask_ctd, mask_cmems, sigma_obs),
+        each (nz, nx) float32.
+    """
+    if rng is None:
+        rng = np.random.default_rng(42)
+
+    T_obs = np.zeros((nz, nx), np.float32)
+    S_obs = np.zeros((nz, nx), np.float32)
+    mask_ctd = np.zeros((nz, nx), np.float32)
+    mask_cmems = np.zeros((nz, nx), np.float32)
+    sigma_obs = np.zeros((nz, nx), np.float32)
+
+    ctd_xs = np.sort(rng.choice(nx, min(n_ctd, nx), replace=False))
+    for xi in ctd_xs:
+        d = int(bathy[xi] * nz)
+        if d < 2:
+            continue
+        mask_ctd[:d, xi] = 1.0
+        sigma_obs[:d, xi] = noise_ctd
+        T_obs[:d, xi] = np.clip(
+            T[:d, xi] + rng.normal(0, noise_ctd, d).astype(np.float32), 0, 1
+        )
+        S_obs[:d, xi] = np.clip(
+            S[:d, xi] + rng.normal(0, noise_ctd, d).astype(np.float32), 0, 1
+        )
+
+    cmems_z_raw = np.logspace(0, np.log10(max(nz - 1, 1)), n_cmems_z)
+    cmems_zs = np.unique(np.clip(cmems_z_raw.astype(int), 0, nz - 1))
+    cmems_xs = np.linspace(0, nx - 1, n_cmems_x, dtype=int)
+
+    for zi in cmems_zs:
+        for xi in cmems_xs:
+            if not below[zi, xi] and mask_ctd[zi, xi] < 0.5:
+                mask_cmems[zi, xi] = 1.0
+                sigma_obs[zi, xi] = noise_cmems
+                T_obs[zi, xi] = np.clip(
+                    T[zi, xi] + np.float32(rng.normal(0, noise_cmems)), 0, 1
+                )
+                S_obs[zi, xi] = np.clip(
+                    S[zi, xi] + np.float32(rng.normal(0, noise_cmems)), 0, 1
+                )
+
+    return T_obs, S_obs, mask_ctd, mask_cmems, sigma_obs
+
+
+def make_hydro_synthetic_sample(
+    nx: int = 64,
+    nz: int = 64,
+    n_ctd: int = 5,
+    n_cmems_x: int = 8,
+    n_cmems_z: int = 10,
+    noise_ctd: float = 0.05,
+    noise_cmems: float = 0.10,
+    rng: np.random.Generator | None = None,
+    mode: str = "realistic",
+    season: str = "summer",
+) -> dict:
+    """Generate a single 8-channel hydro training sample using Baltic physics.
+
+    Uses ``synthetic_baltic.SceneGenerator`` for physically realistic T/S/u/v
+    fields, then samples CTD profiles and CMEMS points to build the 8-channel
+    input tensor expected by ``HydroGenerator``.
+
+    Input channels (8, nz, nx):
+        0: T_obs       — observed T values, 0 outside observations
+        1: S_obs       — observed S values, 0 outside observations
+        2: mask_ctd    — 1 where CTD profile exists (high-trust vertical line)
+        3: mask_cmems  — 1 where CMEMS point exists (low-trust sparse point)
+        4: u_lr        — zonal velocity, low-res upsampled
+        5: v_lr        — meridional velocity, low-res upsampled
+        6: bathymetry  — continuous bottom depth ∈ [0,1], broadcast over z
+        7: sigma_obs   — per-point uncertainty: 0.05 CTD, 0.10 CMEMS, 0 elsewhere
+
+    Target channels (2, nz, nx):
+        0: T_pred      — ground truth temperature ∈ [0, 1]
+        1: S_pred      — ground truth salinity ∈ [0, 1]
+
+    Args:
+        nx: Horizontal grid points.
+        nz: Vertical grid points.
+        n_ctd: Number of CTD profiles per sample.
+        n_cmems_x: Number of CMEMS columns per sample.
+        n_cmems_z: Number of CMEMS depth levels per column.
+        noise_ctd: CTD measurement noise σ.
+        noise_cmems: CMEMS measurement noise σ.
+        rng: Seeded NumPy generator. Created from seed if None.
+        mode: Baltic generation mode ("realistic", "extended", "stress").
+        season: Season ("winter", "spring", "summer", "autumn").
+
+    Returns:
+        Dict with keys: image, target, mask, fill_mask, bathy, below,
+        sigma_obs, obs_mask, u_input, bathy_indices.
+    """
+    from .synthetic_baltic import SceneGenerator, Domain
+
+    if rng is None:
+        rng = np.random.default_rng(42)
+
+    seed_val = int(rng.integers(0, 2**31))
+    gen = SceneGenerator(seed=seed_val)
+    domain = Domain(nx=nx, nz=nz)
+    scene = gen.generate(domain, mode=mode, season=season)
+
+    T_raw = scene["T"]   # (nz, nx), NaN below bottom
+    S_raw = scene["S"]
+    u_raw = scene["u"]
+    v_raw = scene["v"]
+    bottom_m = scene["bottom"]  # (nx,) in metres
+    mask_water = scene["mask"]  # (nz, nx) bool, True where water
+
+    # Normalised bathymetry ∈ [0, 1]
+    bathy = (bottom_m / domain.zmax).astype(np.float32)
+
+    # Below-seabed mask
+    z_norm = np.linspace(0, 1, nz)[:, None]
+    below = ~mask_water  # (nz, nx) bool
+
+    # Normalise T, S to [0, 1] within water domain
+    T = _normalize_field(T_raw, mask_water)
+    S = _normalize_field(S_raw, mask_water)
+
+    # Normalise u, v: replace NaN below bottom with 0, then scale to [0, 1]
+    u_arr = np.nan_to_num(u_raw.astype(np.float64), nan=0.0)
+    v_arr = np.nan_to_num(v_raw.astype(np.float64), nan=0.0)
+    valid_u = u_arr[mask_water]
+    valid_v = v_arr[mask_water]
+    u_max = max(float(np.abs(valid_u).max()) if valid_u.size > 0 else 1.0, 1e-8)
+    v_max = max(float(np.abs(valid_v).max()) if valid_v.size > 0 else 1.0, 1e-8)
+    u_arr = np.clip(u_arr / u_max, -1.0, 1.0)
+    v_arr = np.clip(v_arr / v_max, -1.0, 1.0)
+
+    # LR simulation: downsample velocity then upsample (mimics CMEMS coarse grid)
+    factor = max(1, min(nx, nz) // 16)
+    if factor > 1:
+        u_ds = u_arr[::factor, ::factor]
+        v_ds = v_arr[::factor, ::factor]
+        u_lr = np.kron(u_ds, np.ones((factor, factor)))[:nz, :nx].astype(np.float32)
+        v_lr = np.kron(v_ds, np.ones((factor, factor)))[:nz, :nx].astype(np.float32)
+    else:
+        u_lr = u_arr.astype(np.float32)
+        v_lr = v_arr.astype(np.float32)
+
+    # Shift u_lr, v_lr from [-1, 1] to [0, 1] for network input
+    u_lr = np.clip((u_lr + 1.0) / 2.0, 0.0, 1.0)
+    v_lr = np.clip((v_lr + 1.0) / 2.0, 0.0, 1.0)
+
+    # Zero out below-bottom in velocity channels
+    u_lr[below] = 0.0
+    v_lr[below] = 0.0
+
+    # --- Observation channels ---
+    T_obs, S_obs, mask_ctd, mask_cmems, sigma_obs = sample_observations(
+        T, S, below, bathy, nx, nz,
+        n_ctd, n_cmems_x, n_cmems_z, noise_ctd, noise_cmems, rng,
+    )
+
+    # Bathymetry channel: continuous depth value broadcast over z
+    bathy_ch = np.tile(bathy[None, :], (nz, 1)).astype(np.float32)
+
+    # Mask below seabed in T, S targets
+    T[below] = 0.0
+    S[below] = 0.0
+
+    # Stack 8 input channels
+    inp = np.stack(
+        [T_obs, S_obs, mask_ctd, mask_cmems, u_lr, v_lr, bathy_ch, sigma_obs],
+        axis=0,
+    ).astype(np.float32)  # (8, nz, nx)
+
+    # Stack 2 target channels
+    tgt = np.stack([T, S], axis=0).astype(np.float32)  # (2, nz, nx)
+
+    # Combined observation mask (CTD ∪ CMEMS)
+    obs_mask = np.clip(mask_ctd + mask_cmems, 0, 1).astype(np.float32)
+
+    # Bathymetry as integer indices for BBL loss
+    bathy_indices = np.clip((bathy * nz).astype(int), 1, nz - 1)
+
+    # Below-bottom as float for fill_mask (3ch for compatibility)
+    fill_mask = np.stack([below.astype(np.float32)] * 3, axis=0)
+
+    return {
+        "image": inp,           # (8, nz, nx) — generator input
+        "target": tgt,          # (2, nz, nx) — ground truth T,S
+        "mask": below.astype(np.float32)[None],  # (1, nz, nx) — below-bottom mask
+        "fill_mask": fill_mask, # (3, nz, nx) — compatibility
+        "bathy": bathy,         # (nx,) — normalised bottom depth
+        "below": below,         # (nz, nx) bool
+        "sigma_obs": sigma_obs[None],  # (1, nz, nx) — per-point uncertainty
+        "obs_mask": obs_mask[None],    # (1, nz, nx) — observation locations
+        "u_input": u_lr[None],         # (1, nz, nx) — zonal velocity input
+        "bathy_indices": bathy_indices, # (nx,) — int indices for BBL loss
     }

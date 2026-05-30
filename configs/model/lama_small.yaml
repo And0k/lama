@@ -1,5 +1,0 @@
-_target_: models.factory.build_model
-in_channels: 3
-num_classes: 3
-# Optionally provide a Hydra instantiable generator config under `generator_cfg`.
-generator_cfg: null

@@ -3,26 +3,50 @@
 Provides spatial regularization and physical constraint losses that
 encourage physically plausible reconstructions of ocean fields.
 
-Physics-motivated losses (ported from bin/lama_hydro_simple_end2end/train.py):
+Physics-motivated losses (ported from bin/lama_hydro_simple_end2end/hydro_attention.py):
     hydrostatic_stability_loss: penalizes density inversions (∂ρ/∂z < 0)
     bottom_boundary_layer_loss: penalizes non-zero vertical gradient at bottom
     observation_weighted_mse: MSE weighted by observation mask + domain mask
+    geostrophic_balance_loss: thermal wind balance ∂u/∂z ~ -∂ρ/∂x
+    inverse_variance_mse: inverse-variance (sigma) weighted MSE at observation points
+
+All loss functions return raw (unweighted) scalar tensors.  External
+weights are applied at the call site in the loss composition, not inside
+the loss function.  This keeps the loss definitions pure physics and
+makes weight tuning visible in one place (config or training script).
 """
+
+import logging
 
 import torch
 import torch.nn.functional as F
 
+logger = logging.getLogger(__name__)
 
-def smoothness_loss(pred, mask=None, weight=1.0):
+
+def linearized_density(T, S, alpha=0.20, beta=0.08):
+    """Linearized equation of state for Baltic Sea.
+
+    ρ ≈ 1 - α·T + β·S  with T, S in [0, 1].
+
+    Args:
+        T: Temperature tensor, any shape.
+        S: Salinity tensor, same shape as T.
+        alpha: Thermal expansion coefficient.
+        beta: Haline contraction coefficient.
+
+    Returns:
+        Density tensor, same shape as T.
+    """
+    return 1.0 - alpha * T + beta * S
+
+
+def smoothness_loss(pred, mask=None):
     """Spatial smoothness loss using total variation.
-
-    Penalizes large spatial gradients in the predicted field.
-    Useful for oceanographic fields where physical quantities vary smoothly.
 
     Args:
         pred: (B, C, H, W) predicted field
-        mask: (B, 1, H, W) optional binary mask (1 = masked region to ignore)
-        weight: scalar multiplier
+        mask: (B, 1, H, W) binary mask, 1.0 below bottom (ignored in loss)
 
     Returns:
         Scalar loss
@@ -34,22 +58,16 @@ def smoothness_loss(pred, mask=None, weight=1.0):
 
     grad_h = effective[:, :, 1:, :] - effective[:, :, :-1, :]
     grad_w = effective[:, :, :, 1:] - effective[:, :, :, :-1]
-    return weight * (grad_h.abs().mean() + grad_w.abs().mean())
+    return (grad_h.abs().mean() + grad_w.abs().mean()) * 0.5
 
 
-def physical_bounds_loss(pred, bounds, mask=None, weight=1.0):
+def physical_bounds_loss(pred, bounds, mask=None):
     """Penalize predictions outside physically valid ranges.
-
-    Each channel is checked against its (vmin, vmax) bounds.
-    Loss is MSE of the violation (how far out of range).
 
     Args:
         pred: (B, C, H, W) predicted field in [0,1] scaled space
-        bounds: list of (vmin, vmax) tuples, one per channel. Values are in
-                the same [0,1] scaled space (i.e. already normalized).
-                If bounds are in physical space, convert to [0,1] first.
-        mask: (B, 1, H, W) optional binary mask (1 = masked region to ignore)
-        weight: scalar multiplier
+        bounds: list of (vmin, vmax) tuples, one per channel
+        mask: (B, 1, H, W) binary mask, 1.0 below bottom (ignored in loss)
 
     Returns:
         Scalar loss
@@ -70,27 +88,16 @@ def physical_bounds_loss(pred, bounds, mask=None, weight=1.0):
 
         total_loss = total_loss + violation.pow(2).mean()
 
-    return weight * total_loss
+    return total_loss
 
 
-def gradient_consistency_loss(pred, target=None, mask=None, weight=1.0):
+def gradient_consistency_loss(pred, target=None, mask=None):
     """Laplacian-based gradient consistency loss.
-
-    If target is provided, penalizes difference in Laplacian between pred and target.
-    If target is None, penalizes the Laplacian magnitude (encourages smooth fields).
-
-    Uses a 3x3 Laplacian kernel applied without padding (valid convolution)
-    to avoid border artifacts:
-
-        [[0,  1, 0],
-         [1, -4, 1],
-         [0,  1, 0]]
 
     Args:
         pred: (B, C, H, W) predicted field
         target: (B, C, H, W) optional target field
-        mask: (B, 1, H, W) optional binary mask (1 = masked region to ignore)
-        weight: scalar multiplier
+        mask: (B, 1, H, W) binary mask, 1.0 below bottom (ignored in loss)
 
     Returns:
         Scalar loss
@@ -114,42 +121,47 @@ def gradient_consistency_loss(pred, target=None, mask=None, weight=1.0):
         mask_cropped = mask[:, :, 1:-1, 1:-1]
         diff = diff * (1 - mask_cropped)
 
-    return weight * diff.mean()
+    return diff.mean()
 
 
 # ── Physics-motivated losses from lama_hydro_simple_end2end ────────────
 
 
 def hydrostatic_stability_loss(pred, channel_index=1, below_mask=None,
-                                alpha=0.25, weight=1.0):
+                                alpha=0.20, beta=0.08,
+                                salinity_index=None):
     """Penalize density inversions (hydrostatic instability).
 
     In a stably stratified ocean, density must increase with depth:
         ∂ρ/∂z ≥ 0.
-    Using a linearized equation of state  ρ ≈ 1 - α·T_norm  (with T_norm
-    in [0, 1]), this is equivalent to  ∂T/∂z ≤ 0.  Any positive vertical
-    temperature gradient (warmer water below cooler water) indicates an
-    unstable density inversion.
+    Using a linearized equation of state  ρ ≈ 1 - α·T + β·S, instability
+    occurs when  α·∂T/∂z - β·∂S/∂z > 0.  Only penalizes the violating
+    part via ReLU.
 
-    Central finite difference is used for the vertical derivative (axis 2).
+    When salinity_index is None, falls back to single-channel T-only EOS
+    (backward compatible with T-only pipeline).
 
     Args:
-        pred:         (B, C, H, W) predicted field in [0, 1].
+        pred:          (B, C, H, W) predicted field in [0, 1].
         channel_index: int, index of the temperature channel in dim 1.
-        below_mask:   (B, 1, H, W) float mask, 1.0 below bottom (outside
-                      domain), 0.0 above.  If None, no masking is applied.
-        alpha:        float, thermal expansion coefficient for linearized EOS.
-                      Only affects the sign; the loss penalizes dT/dz > 0
-                      regardless of alpha value.
-        weight:       scalar multiplier.
+        below_mask:    (B, 1, H, W) float mask, 1.0 below bottom.
+        alpha:         float, thermal expansion coefficient.
+        beta:          float, haline contraction coefficient.
+        salinity_index: int or None. If provided, use full T+S EOS.
+                        If None, use T-only (ρ ≈ 1 - α·T).
 
     Returns:
         Scalar loss.
     """
     T = pred[:, channel_index:channel_index + 1, :, :]  # (B, 1, H, W)
 
-    # Central difference: dT/dz at interior points
-    dT_dz = T[:, :, 2:, :] - T[:, :, :-2, :]  # (B, 1, H-2, W)
+    if salinity_index is not None:
+        S = pred[:, salinity_index:salinity_index + 1, :, :]
+        rho = linearized_density(T, S, alpha=alpha, beta=beta)
+    else:
+        rho = 1.0 - alpha * T
+
+    drho_dz = rho[:, :, 2:, :] - rho[:, :, :-2, :]  # (B, 1, H-2, W)
 
     if below_mask is not None:
         domain = 1.0 - below_mask
@@ -157,32 +169,27 @@ def hydrostatic_stability_loss(pred, channel_index=1, below_mask=None,
     else:
         mask = 1.0
 
-    # Only penalize positive dT/dz (warm water below cold = unstable)
-    instability = F.relu(dT_dz)
-    return weight * (instability * mask).mean()
+    unstable = F.relu(-drho_dz)
+    return (unstable * mask).mean()
 
 
 def bottom_boundary_layer_loss(pred, bathy_indices, channel_index=1,
-                                weight=1.0):
-    """Penalize non-zero vertical temperature gradient near the bottom.
+                                salinity_index=None):
+    """Penalize non-zero vertical gradient near the bottom.
 
-    In the bottom boundary layer (BBL), turbulent mixing homogenizes
-    temperature, so dT/dz → 0 at the seafloor.  This loss penalizes
-    the squared difference between the temperature at the last two
-    grid cells above the bottom.
+    In the bottom boundary layer, turbulent mixing homogenizes T and S,
+    so ∂T/∂z → 0 and ∂S/∂z → 0 at the seafloor.
 
     Args:
         pred:          (B, C, H, W) predicted field in [0, 1].
-        bathy_indices: (B, W) int tensor of bottom depth indices (in grid
-                       cells).  Values ≤ 1 are skipped (too shallow).
-        channel_index: int, index of the temperature channel in dim 1.
-        weight:        scalar multiplier.
+        bathy_indices: (B, W) int tensor of bottom depth indices.
+        channel_index: int, index of the temperature channel.
+        salinity_index: int or None. If provided, also penalize ∂S/∂z.
 
     Returns:
         Scalar loss.
     """
-    T = pred[:, channel_index]  # (B, H, W)
-    B, H, W = T.shape
+    B, _, H, W = pred.shape
 
     total = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
     count = 0
@@ -191,32 +198,31 @@ def bottom_boundary_layer_loss(pred, bathy_indices, channel_index=1,
         for xi in range(W):
             zi = int(bathy_indices[bi, xi].item()) - 2
             if 1 < zi < H - 1:
-                dT = T[bi, zi, xi] - T[bi, zi - 1, xi]
+                dT = pred[bi, channel_index, zi, xi] - pred[bi, channel_index, zi - 1, xi]
                 total = total + dT ** 2
                 count += 1
+                if salinity_index is not None:
+                    dS = pred[bi, salinity_index, zi, xi] - pred[bi, salinity_index, zi - 1, xi]
+                    total = total + dS ** 2
 
-    return weight * total / max(count, 1)
+    return total / max(count, 1)
 
 
 def observation_weighted_mse(pred, target, obs_mask, below_mask=None,
-                              weight_known=1.0, weight_domain=0.1,
-                              weight=1.0):
+                              weight_known=1.0, weight_domain=0.1):
     """MSE weighted by observation and domain masks.
 
-    Two-term loss:
-        L = weight_known  · MSE(pred, target) in observed pixels
-          + weight_domain · MSE(pred, target) in domain (above bottom)
+    weight_known and weight_domain are formula-internal: they control the
+    relative contribution of observed vs domain points within the loss.
+    External weighting is applied by the caller.
 
     Args:
         pred:         (B, C, H, W) predicted field.
         target:       (B, C, H, W) target field.
-        obs_mask:     (B, 1, H, W) float mask, 1.0 at observation locations
-                      (CTD + CMEMS), 0.0 elsewhere.
-        below_mask:   (B, 1, H, W) float mask, 1.0 below bottom (outside
-                      domain), 0.0 above.  If None, domain = 1 everywhere.
-        weight_known: multiplier for the observation-term MSE.
-        weight_domain: multiplier for the domain-term MSE.
-        weight:       scalar multiplier for the total.
+        obs_mask:     (B, 1, H, W) float mask, 1.0 at observation locations.
+        below_mask:   (B, 1, H, W) float mask, 1.0 below bottom.
+        weight_known: multiplier for the observation-term MSE (formula-internal).
+        weight_domain: multiplier for the domain-term MSE (formula-internal).
 
     Returns:
         Scalar loss.
@@ -229,4 +235,80 @@ def observation_weighted_mse(pred, target, obs_mask, below_mask=None,
     l_obs = F.mse_loss(pred * obs_mask, target * obs_mask)
     l_dom = F.mse_loss(pred * domain, target * domain)
 
-    return weight * (weight_known * l_obs + weight_domain * l_dom)
+    return weight_known * l_obs + weight_domain * l_dom
+
+
+def inverse_variance_mse(pred, target, sigma, obs_mask, below_mask=None,
+                          weight_domain=0.1):
+    """Inverse-variance weighted MSE at observation points.
+
+    Points with lower sigma (e.g. CTD, sigma=0.05) get higher weight
+    than points with higher sigma (e.g. CMEMS, sigma=0.10).
+    weight = 1 / (sigma + eps)^2  — maximum likelihood under Gaussian noise.
+
+    L = mean(weight * (pred - target)^2) at observed points
+      + weight_domain * MSE(pred, target) in domain
+
+    weight_domain is formula-internal (controls domain contribution).
+    External weighting is applied by the caller.
+
+    Args:
+        pred:       (B, C, H, W) predicted field.
+        target:     (B, C, H, W) target field.
+        sigma:      (B, 1, H, W) per-point uncertainty map.
+        obs_mask:   (B, 1, H, W) binary mask, 1.0 at observations.
+        below_mask: (B, 1, H, W) binary mask, 1.0 below bottom.
+        weight_domain: multiplier for the domain MSE term (formula-internal).
+
+    Returns:
+        Scalar loss.
+    """
+    if below_mask is not None:
+        domain = 1.0 - below_mask
+    else:
+        domain = torch.ones_like(obs_mask)
+
+    inv_var = obs_mask / (sigma.clamp(min=0.01).pow(2))
+    l_obs = (inv_var * (pred - target).pow(2)).mean()
+    l_dom = F.mse_loss(pred * domain, target * domain)
+
+    return l_obs + weight_domain * l_dom
+
+
+def geostrophic_balance_loss(pred, u_input, below_mask=None):
+    """Thermal wind balance on 2D (x, z) slice.
+
+    Geostrophic relation:  ∂u/∂z = -(g / f·ρ₀) · ∂ρ/∂x
+    Penalize mismatch between predicted ∂ρ/∂x and observed ∂u/∂z.
+    Both terms are normalized to unit standard deviation before comparing
+    so that magnitude differences don't dominate.
+
+    Args:
+        pred:       (B, 2, H, W) predicted [T, S] in [0, 1].
+        u_input:    (B, 1, H, W) zonal velocity input (LR upsampled).
+        below_mask: (B, 1, H, W) binary mask, 1.0 below bottom.
+
+    Returns:
+        Scalar loss.
+    """
+    T, S = pred[:, :1], pred[:, 1:]
+    rho = linearized_density(T, S)
+
+    if below_mask is not None:
+        domain = 1.0 - below_mask
+    else:
+        domain = torch.ones_like(T)
+
+    drho_dx = rho[:, :, :, 2:] - rho[:, :, :, :-2]   # (B, 1, H, W-2)
+    du_dz = u_input[:, :, 2:, :] - u_input[:, :, :-2, :]  # (B, 1, H-2, W)
+
+    h_min = min(drho_dx.shape[2], du_dz.shape[2])
+    w_min = min(drho_dx.shape[3], du_dz.shape[3])
+    d = drho_dx[:, :, :h_min, :w_min]
+    u_shear = du_dz[:, :, :h_min, :w_min]
+    m = domain[:, :, :h_min, :w_min]
+
+    d_n = d / (d.std() + 1e-6)
+    u_n = u_shear / (u_shear.std() + 1e-6)
+
+    return (m * (d_n + u_n).pow(2)).mean()

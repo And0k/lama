@@ -12,7 +12,7 @@ from torch.utils.data import DistributedSampler
 from saicinpainting.evaluation import make_evaluator
 from saicinpainting.training.data.datasets import make_default_train_dataloader, make_default_val_dataloader
 from saicinpainting.training.losses.adversarial import make_discrim_loss
-from saicinpainting.training.losses.perceptual import PerceptualLoss, ResNetPL
+from saicinpainting.training.losses.perceptual import PerceptualLoss
 from saicinpainting.training.modules import make_generator, make_discriminator
 from saicinpainting.training.visualizers import make_visualizer
 from saicinpainting.utils import add_prefix_to_keys, average_dicts, set_requires_grad, flatten_dict, \
@@ -112,10 +112,7 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
             if self.config.losses.perceptual.weight > 0:
                 self.loss_pl = PerceptualLoss()
 
-            if self.config.losses.get("resnet_pl", {"weight": 0})['weight'] > 0:
-                self.loss_resnet_pl = ResNetPL(**self.config.losses.resnet_pl)
-            else:
-                self.loss_resnet_pl = None
+            self.loss_resnet_pl = None
 
             domain_cfg = self.config.losses.get("domain", {})
             self.domain_losses = {}
@@ -145,7 +142,9 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
                     "fn": hydrostatic_stability_loss,
                     "weight": domain_cfg.stability.weight,
                     "channel_index": domain_cfg.stability.get("channel_index", 1),
-                    "alpha": domain_cfg.stability.get("alpha", 0.25),
+                    "alpha": domain_cfg.stability.get("alpha", 0.20),
+                    "beta": domain_cfg.stability.get("beta", 0.08),
+                    "salinity_index": domain_cfg.stability.get("salinity_index", None),
                 }
 
             if domain_cfg.get("bbl", {}).get("weight", 0) > 0:
@@ -154,6 +153,7 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
                     "fn": bottom_boundary_layer_loss,
                     "weight": domain_cfg.bbl.weight,
                     "channel_index": domain_cfg.bbl.get("channel_index", 1),
+                    "salinity_index": domain_cfg.bbl.get("salinity_index", None),
                 }
 
             if domain_cfg.get("observation_mse", {}).get("weight", 0) > 0:
@@ -163,6 +163,21 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
                     "weight": domain_cfg.observation_mse.weight,
                     "weight_known": domain_cfg.observation_mse.get("weight_known", 1.0),
                     "weight_domain": domain_cfg.observation_mse.get("weight_domain", 0.1),
+                }
+
+            if domain_cfg.get("inverse_variance_mse", {}).get("weight", 0) > 0:
+                from saicinpainting.training.losses.physical import inverse_variance_mse
+                self.domain_losses["inverse_variance_mse"] = {
+                    "fn": inverse_variance_mse,
+                    "weight": domain_cfg.inverse_variance_mse.weight,
+                    "weight_domain": domain_cfg.inverse_variance_mse.get("weight_domain", 0.1),
+                }
+
+            if domain_cfg.get("geostrophic", {}).get("weight", 0) > 0:
+                from saicinpainting.training.losses.physical import geostrophic_balance_loss
+                self.domain_losses["geostrophic"] = {
+                    "fn": geostrophic_balance_loss,
+                    "weight": domain_cfg.geostrophic.weight,
                 }
 
         self.visualize_each_iters = visualize_each_iters
@@ -385,8 +400,10 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
         raise NotImplementedError()
 
     def store_discr_outputs(self, batch):
-        out_size = batch['image'].shape[2:]
-        discr_real_out, _ = self.discriminator(batch['image'])
+        # Hydro pipeline: discriminator operates on target (2ch), not image (8ch)
+        real_img = batch.get('target', batch['image'])
+        out_size = real_img.shape[2:]
+        discr_real_out, _ = self.discriminator(real_img)
         discr_fake_out, _ = self.discriminator(batch['predicted_image'])
         batch['discr_output_real'] = F.interpolate(discr_real_out, size=out_size, mode='nearest')
         batch['discr_output_fake'] = F.interpolate(discr_fake_out, size=out_size, mode='nearest')

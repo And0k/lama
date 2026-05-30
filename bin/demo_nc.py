@@ -31,12 +31,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+import hydra
 import matplotlib
+import numpy as np
+import torch
+from omegaconf import DictConfig, OmegaConf
+from torch.utils.data import DataLoader
 
-from demo_utils import _load_lama_model, _resolve_model, _resolve_nc_file, demo_loading_and_slicing
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
 
 PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if PROJECT_ROOT not in sys.path:
@@ -44,10 +47,7 @@ if PROJECT_ROOT not in sys.path:
 
 os.environ.setdefault("PROJECT_ROOT", PROJECT_ROOT)
 
-import hydra
-import torch
-from omegaconf import DictConfig, OmegaConf
-from torch.utils.data import DataLoader
+from demo_utils import _load_lama_model, _resolve_model, _resolve_nc_file, demo_loading_and_slicing
 
 from netcdf.data.dataset import NetCDFDataset
 from netcdf.data.loader import read_units, resolve_output_channels

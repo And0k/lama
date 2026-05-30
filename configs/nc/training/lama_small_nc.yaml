@@ -20,9 +20,6 @@ losses:
     allow_scale_mask: true
   feature_matching:
     weight: 100
-  resnet_pl:
-    weight: 30
-    weights_path: ${env:TORCH_HOME}
 
 defaults:
   - location: docker

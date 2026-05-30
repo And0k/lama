@@ -1,5 +1,0 @@
-# CMEMS vertical slice data configuration
-# Includes the nc data config with vertical slice settings
-
-defaults:
-  - /nc/data/cmems_vertical

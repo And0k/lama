@@ -1,0 +1,6 @@
+# @package _group_
+# PatchGAN discriminator for hydro T+S pipeline (2-channel input)
+kind: pix2pixhd_nlayer
+input_nc: 2
+ndf: 64
+n_layers: 4

@@ -1,11 +1,12 @@
 import logging
 
 from saicinpainting.training.modules.ffc import FFCResNetGenerator
+from saicinpainting.training.modules.hydro import HydroGenerator
 from saicinpainting.training.modules.pix2pixhd import GlobalGenerator, MultiDilatedGlobalGenerator, \
     NLayerDiscriminator, MultidilatedNLayerDiscriminator
 
 def make_generator(config, kind, **kwargs):
-    logging.info(f'Make generator {kind}')
+    logging.info('Make generator %s', kind)
 
     if kind == 'pix2pixhd_multidilated':
         return MultiDilatedGlobalGenerator(**kwargs)
@@ -16,7 +17,10 @@ def make_generator(config, kind, **kwargs):
     if kind == 'ffc_resnet':
         return FFCResNetGenerator(**kwargs)
 
-    raise ValueError(f'Unknown generator kind {kind}')
+    if kind == 'hydro':
+        return HydroGenerator(**kwargs)
+
+    raise ValueError('Unknown generator kind %s' % kind)
 
 
 def make_discriminator(kind, **kwargs):

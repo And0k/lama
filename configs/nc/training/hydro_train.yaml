@@ -1,0 +1,25 @@
+# Hydro T+S training defaults
+# Override via CLI: python notebooks/train_hydro_colab.py epochs=10 batch_size=8
+
+defaults:
+  - _self_
+
+# Training
+epochs: 40
+batch_size: 4
+val_batch_size: 2
+lr: 2e-4
+seed: 42
+
+# Data
+n_train: 400
+n_val: 80
+nx: 64
+nz: 64
+
+# Visualization
+viz_every: 5
+
+# Output (date-based, auto-resume from best checkpoint in same dir)
+# Leave empty to auto-generate from date: hydro_YYYY-MM-DD
+outdir: ""

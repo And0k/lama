@@ -1,21 +1,21 @@
 # Core dependencies
 pyyaml
 tqdm
-numpy<2.0.0
+numpy
 easydict==1.9.0
-opencv-python
-tensorflow
 joblib
 matplotlib
 pandas
-albumentations==0.5.2
 tabulate
-kornia==0.5.0
-webdataset
 packaging
 scikit-image
 scikit-learn
-wldhx.yadisk-direct
+scipy
+
+# Image / augmentation (used by original LaMa training code)
+opencv-python-headless
+albumentations==0.5.2
+kornia==0.5.0
 
 # Hydra & configs
 hydra-core==1.3.2
@@ -30,6 +30,9 @@ torchvision
 # NetCDF support
 xarray
 netcdf4
+
+# TensorBoard (for training logging & report_hydro_metrics.py)
+tensorboard
 
 # Testing & development
 pytest>=7.0

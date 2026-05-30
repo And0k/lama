@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 
-from models.ade20k import ModelBuilder
 from saicinpainting.utils import check_and_warn_input_range
 
 
@@ -83,31 +82,3 @@ class PerceptualLoss(nn.Module):
 
         features_input = self.vgg(features_input)
         return features_input
-
-
-class ResNetPL(nn.Module):
-    def __init__(self, weight=1,
-                 weights_path=None, arch_encoder='resnet50dilated', segmentation=True):
-        super().__init__()
-        self.impl = ModelBuilder.get_encoder(weights_path=weights_path,
-                                             arch_encoder=arch_encoder,
-                                             arch_decoder='ppm_deepsup',
-                                             fc_dim=2048,
-                                             segmentation=segmentation)
-        self.impl.eval()
-        for w in self.impl.parameters():
-            w.requires_grad_(False)
-
-        self.weight = weight
-
-    def forward(self, pred, target):
-        pred = (pred - IMAGENET_MEAN.to(pred)) / IMAGENET_STD.to(pred)
-        target = (target - IMAGENET_MEAN.to(target)) / IMAGENET_STD.to(target)
-
-        pred_feats = self.impl(pred, return_feature_maps=True)
-        target_feats = self.impl(target, return_feature_maps=True)
-
-        result = torch.stack([F.mse_loss(cur_pred, cur_target)
-                              for cur_pred, cur_target
-                              in zip(pred_feats, target_feats)]).sum() * self.weight
-        return result

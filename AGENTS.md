@@ -1,4 +1,4 @@
-Do not break existing configs not related to the netcdf pipeline: add new YAML to configs/ instead of editing the original ones, so that you can roll back. Don't keep backward compatibility of netcdf pipeline: refactor for minimum code, maximum clarity, speed, essential functionality.
+Remove existing configs not related to the netcdf pipeline: but follow same conventions: use YAML in configs/ try minimally interact with original, so we can copy our package as subpackage to the original Lama. Don't keep backward compatibility of netcdf pipeline: refactor for minimum code, maximum clarity, speed, essential functionality.
 
 logging with correct level over print(), logging.exception() on errors
 No hardcoded values in log messages — uses %s with variable names
@@ -14,4 +14,4 @@ Tests: always first batch_size=1, max_epochs=1.
 
 
 Document configuration changes in configs/README.md so others can replicate.
-Keep README_nc.md about netcdf pipeline up to date
+Keep README_nc.md, readme_train_nc.md, README_monitor_nc.md about netcdf pipeline up to date

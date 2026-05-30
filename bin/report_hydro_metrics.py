@@ -16,6 +16,7 @@ Example:
 
 import argparse
 import glob
+import logging
 import os
 import sys
 
@@ -24,7 +25,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-# ── Tag categories ────────────────────────────────────────────────────
+logger = logging.getLogger(__name__)
 
 LOSS_TAGS = [
     "train_gen_l1", "train_gen_l2", "train_gen_smooth", "train_gen_bounds",
@@ -53,30 +54,23 @@ def read_tb_events(logdir: str) -> dict[str, list[tuple[int, float]]]:
         Dict mapping tag → list of (step, value) tuples.
     """
     try:
-        import tensorflow as tf
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
     except ImportError:
-        # Try standalone tb parsing
-        print("ERROR: tensorflow not installed. Install with: pip install tensorflow")
+        logger.error("tensorboard not installed. Install with: pip install tensorboard")
         sys.exit(1)
 
-    tag_data: dict[str, list[tuple[int, float]]] = {}
+    tag_data = {}
     event_files = sorted(glob.glob(os.path.join(logdir, "events.out.tfevents.*")))
 
     if not event_files:
-        print(f"No event files found in {logdir}")
+        logger.warning("No event files found in %s", logdir)
         return tag_data
 
-    for event_file in event_files:
-        try:
-            for event in tf.compat.v1.train.summary_iterator(event_file):
-                for value in event.summary.value:
-                    if value.HasField("simple_value"):
-                        tag = value.tag
-                        if tag not in tag_data:
-                            tag_data[tag] = []
-                        tag_data[tag].append((event.step, value.simple_value))
-        except Exception as e:
-            print(f"Warning: failed to read {event_file}: {e}")
+    ea = EventAccumulator(logdir)
+    ea.Reload()
+    for tag in ea.Tags().get('scalars', []):
+        events = ea.Scalars(tag)
+        tag_data[tag] = [(e.step, e.value) for e in events]
 
     return tag_data
 
@@ -109,7 +103,7 @@ def plot_losses(tag_data: dict, outdir: str):
     path = os.path.join(outdir, "hydro_loss_curves.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
-    print(f"Saved: {path}")
+    logger.info("Saved: %s", path)
 
 
 def plot_metrics(tag_data: dict, outdir: str):
@@ -138,16 +132,16 @@ def plot_metrics(tag_data: dict, outdir: str):
     path = os.path.join(outdir, "hydro_metrics.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
-    print(f"Saved: {path}")
+    logger.info("Saved: %s", path)
 
 
-def write_csv(tag_data: dict, outdir: str):
+def write_csv(tag_data, outdir):
     """Write all logged values to a CSV table."""
     import csv
 
     all_tags = sorted(set(LOSS_TAGS + METRIC_TAGS) & set(tag_data.keys()))
     if not all_tags:
-        print("No matching tags found — skipping CSV")
+        logger.info("No matching tags found — skipping CSV")
         return
 
     # Collect all steps
@@ -163,19 +157,18 @@ def write_csv(tag_data: dict, outdir: str):
         writer.writerow(["step"] + all_tags)
         for step in all_steps:
             row = [step]
-            tag_to_val = {s: v for s, v in tag_data.get(tag, [])}
+            tag_to_val = dict(tag_data.get(tag, []))
             for tag in all_tags:
-                tag_to_val = dict(tag_data.get(tag, []))
                 row.append(tag_to_val.get(step, ""))
             writer.writerow(row)
-    print(f"Saved: {path}")
+    logger.info("Saved: %s", path)
 
 
 def print_summary(tag_data: dict):
     """Print a terminal summary of latest metric values."""
-    print("\n" + "=" * 70)
-    print(f"{'Metric':<35} {'Latest':>10} {'Best':>10}")
-    print("-" * 70)
+    logger.info("=" * 70)
+    logger.info("%s", " " * 13 + "Metric" + " " * 21 + "Latest" + " " * 4 + "Best")
+    logger.info("-" * 70)
 
     for tag in METRIC_TAGS:
         if tag not in tag_data:
@@ -184,12 +177,12 @@ def print_summary(tag_data: dict):
         name = tag.replace("val_", "").replace("_mean", "")
         latest = vals[-1]
         if "violation" in tag or "gradient" in tag or "rmse" in tag:
-            best = min(vals)  # lower is better
+            best = min(vals)
         else:
-            best = max(vals)  # higher is better (SSIM, correlation)
-        print(f"  {name:<33} {latest:>10.6f} {best:>10.6f}")
+            best = max(vals)
+        logger.info("  %s: %10.6f %10.6f", name, latest, best)
 
-    print("=" * 70)
+    logger.info("=" * 70)
 
 
 def main():
@@ -203,12 +196,12 @@ def main():
     outdir = args.outdir or os.path.join(args.tb_logdir, "report")
     os.makedirs(outdir, exist_ok=True)
 
-    print(f"Reading TensorBoard events from: {args.tb_logdir}")
+    logger.info("Reading TensorBoard events from: %s", args.tb_logdir)
     tag_data = read_tb_events(args.tb_logdir)
-    print(f"Found {len(tag_data)} tags")
+    logger.info("Found %d tags", len(tag_data))
 
     if not tag_data:
-        print("No data found. Check the log directory path.")
+        logger.error("No data found. Check the log directory path.")
         sys.exit(1)
 
     plot_losses(tag_data, outdir)
@@ -216,7 +209,7 @@ def main():
     write_csv(tag_data, outdir)
     print_summary(tag_data)
 
-    print(f"\nAll reports saved to: {outdir}")
+    logger.info("All reports saved to: %s", outdir)
 
 
 if __name__ == "__main__":

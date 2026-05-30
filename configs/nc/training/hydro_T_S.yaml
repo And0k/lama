@@ -1,0 +1,77 @@
+# Training config for T+S hydro-inpainting with cross-attention
+# Full hydro pipeline from bin/lama_hydro_simple_end2end/hydro_attention.py
+#
+# Uses:
+#   - HydroGenerator (dual-head decoder + T↔S cross-attention)
+#   - 8 input channels: [T_obs, S_obs, mask_ctd, mask_cmems, u_lr, v_lr, bathymetry, sigma_obs]
+#   - 2 output channels: [T_pred, S_pred]
+#   - All physical losses including geostrophic balance
+
+run_title: "hydro_T_S"
+
+seed: 42
+
+training_model:
+  kind: default
+  visualize_each_iters: 500
+  concat_mask: false
+  store_discr_outputs_for_vis: true
+
+losses:
+  l1:
+    weight_missing: 1.0
+    weight_known: 10.0
+  l2:
+    weight_missing: 0.5
+    weight_known: 5.0
+  perceptual:
+    weight: 0
+  adversarial:
+    kind: r1
+    weight: 10
+    gp_coef: 0.001
+    mask_as_fake_target: true
+    allow_scale_mask: true
+  feature_matching:
+    weight: 100
+  resnet_pl:
+    weight: 0
+  domain:
+    smoothness:
+      weight: 1.0
+    bounds:
+      weight: 0.5
+      bounds:
+        - [0.0, 1.0]
+        - [0.0, 1.0]
+    gradient:
+      weight: 0.1
+    stability:
+      weight: 0.3
+      channel_index: 0     # T channel index in 2-channel output
+      salinity_index: 1    # S channel index (enables full T+S EOS)
+      alpha: 0.20          # thermal expansion coefficient
+      beta: 0.08           # haline contraction coefficient
+    bbl:
+      weight: 0.2
+      channel_index: 0     # T channel index
+      salinity_index: 1    # S channel index
+    inverse_variance_mse:
+      weight: 1.0
+      weight_domain: 0.1
+    geostrophic:
+      weight: 0.15
+
+defaults:
+  - location: docker
+  - _self_
+  - data: /nc/data/cmems_vertical
+  - generator: /nc/training/generator/hydro
+  - discriminator: /nc/training/discriminator/hydro
+  - optimizers: /nc/training/optimizers/default
+  - visualizer: directory
+  - evaluator: /nc/evaluator/physical
+  - trainer: any_gpu_large_ssim_ddp_final
+  - hydra: overrides
+  - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog

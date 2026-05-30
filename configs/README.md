@@ -123,11 +123,7 @@ Used by default in NC training configs (`lama_small_nc.yaml`, `cmems_vertical_l1
 
 ADAM optimizer settings (betas [0.0, 0.999]).
 
-### `nc/data/transforms/transforms_nc.yaml`
-
-Data augmentation and normalization for NetCDF slices.
-
-## Training Configuration
+## NetCDF Configuration
 
 ### `nc/training/lama_small_nc.yaml`
 
@@ -225,6 +221,19 @@ refiner:
   max_scales: 3
   px_budget: 1800000
 ```
+
+## Error Analysis
+
+### `bin/analyze_errors_nc.py`
+
+Analyze NetCDF inpainting prediction quality using physics-aware metrics:
+
+```bash
+python bin/analyze_errors_nc.py /path/to/predictions_dir --variables thetao so uo --top-n 10
+```
+
+Computes RMSE, Correlation, SSIM, StabilityViolation, and BBLGradient scores.
+Saves `analysis_results.csv` and visualization grids of best/worst samples.
 
 ## Standard LaMa Configuration
 
@@ -375,4 +384,57 @@ print(cs["type"])  # "rotated_pole" or "curvilinear"
 # Regrid to regular lat/lon
 regrid_dataset("ocean_model_output.nc", "regular_latlon.nc",
                target_lat_size=180, target_lon_size=360)
+```
+
+## Hydro T+S Pipeline
+
+### Overview
+
+The hydro pipeline trains a dual-head generator (T+S) with physical losses
+on synthetic Baltic Sea data. Ported from `bin/todo/hydro_attention.py`.
+
+| Config | Purpose |
+|--------|---------|
+| `nc/training/hydro_T_S.yaml` | Full training config (losses, model, data) |
+| `nc/training/generator/hydro.yaml` | HydroGenerator (8ch→2ch, 530K params) |
+| `nc/training/discriminator/hydro.yaml` | PatchGAN discriminator (2ch input) |
+| `nc/data/synthetic_baltic.yaml` | Baltic synthetic dataset (no NetCDF files needed) |
+
+### Architecture: HydroGenerator (530K params)
+
+- 8 input channels: `[T_obs, S_obs, mask_ctd, mask_cmems, u_lr, v_lr, bathymetry, sigma_obs]`
+- 2 output channels: `[T_pred, S_pred]`
+- Encoder → N × SimpleResBlock → dual T/S heads → TSCrossAttention → Sigmoid
+- `TSCrossAttention`: channel-wise cross-attention (T gates S, S gates T)
+
+### Physical Losses
+
+| Loss | Weight | Formula |
+|------|--------|---------|
+| `inverse_variance_mse` | 1.0 | MSE weighted by 1/σ² |
+| `stability` | 0.3 | ReLU(-∂ρ(T,S)/∂z) with full EOS |
+| `bbl` | 0.2 | (∂T/∂z)² + (∂S/∂z)² at seabed |
+| `geostrophic` | 0.15 | ∂ρ/∂x + ∂u/∂z anti-correlation |
+| `smoothness` | 1.0 | Total variation regularization |
+
+### Training Commands
+
+```bash
+# Smoke test (synthetic data, 1 epoch, batch_size=1)
+source .venv/bin/activate
+.venv/bin/python bin/train.py --config-name=nc/training/hydro_T_S \
+  data=/nc/data/synthetic_baltic \
+  data.nc.data.batch_size=1 \
+  data.nc.data.val_batch_size=1 \
+  trainer.kwargs.max_epochs=1 \
+  trainer.kwargs.limit_train_batches=2 \
+  trainer.kwargs.val_check_interval=2
+
+# Full synthetic training
+.venv/bin/python bin/train.py --config-name=nc/training/hydro_T_S \
+  data=/nc/data/synthetic_baltic
+
+# Real NetCDF data (requires CMEMS file)
+.venv/bin/python bin/train.py --config-name=nc/training/hydro_T_S \
+  'data.nc.data.dataset.filepaths=["/path/to/cmems.nc"]'
 ```

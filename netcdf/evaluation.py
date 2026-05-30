@@ -6,16 +6,74 @@ physics-motivated metrics for oceanographic field reconstruction:
     - BBLGradientScore: mean |dT/dz| near the bottom (should → 0)
     - DomainRMSEScore: RMSE computed only in valid (above-bottom) pixels
     - OIBaselineScore: RMSE of OI interpolation for comparison
+
+Utility functions (used by training scripts and visualization):
+    - compute_metrics: MSE/MAE/RMSE/PSNR in ocean domain
+    - optimal_interpolation: cubic OI from sparse observations
 """
 
 import logging
 
 import numpy as np
 import torch
+from scipy.interpolate import griddata
 
 from saicinpainting.evaluation.losses.base_loss import PairwiseScore
 
 logger = logging.getLogger(__name__)
+
+
+def compute_metrics(pred: np.ndarray, target: np.ndarray,
+                    below: np.ndarray) -> dict:
+    """MSE, MAE, RMSE, PSNR in ocean domain only.
+
+    Args:
+        pred:   (H, W) predicted field.
+        target: (H, W) target field.
+        below:  (H, W) bool, True = below bottom (excluded).
+
+    Returns:
+        Dict with keys: mse, mae, rmse, psnr.
+    """
+    mask = ~below
+    if mask.sum() == 0:
+        return dict(mse=np.nan, mae=np.nan, rmse=np.nan, psnr=np.nan)
+    p, t = pred[mask], target[mask]
+    mse = float(np.mean((p - t) ** 2))
+    mae = float(np.mean(np.abs(p - t)))
+    rmse = float(np.sqrt(mse))
+    psnr = float(20 * np.log10(1.0 / (rmse + 1e-8)))
+    return dict(mse=mse, mae=mae, rmse=rmse, psnr=psnr)
+
+
+def optimal_interpolation(inp_np: np.ndarray, obs_mask_np: np.ndarray,
+                          nz: int, nx: int) -> tuple:
+    """Cubic interpolation from observed points onto full grid.
+
+    Args:
+        inp_np:      (2, nz, nx) [T_obs, S_obs] observed values.
+        obs_mask_np: (1, nz, nx) observation mask (1.0 = observed).
+        nz:          Number of depth levels.
+        nx:          Number of horizontal points.
+
+    Returns:
+        (T_oi, S_oi) each (nz, nx) float32.
+    """
+    mask = obs_mask_np[0]
+    pts = np.argwhere(mask > 0.5)
+    if len(pts) < 4:
+        return (np.zeros((nz, nx), np.float32),
+                np.zeros((nz, nx), np.float32))
+    zi_all, xi_all = np.arange(nz), np.arange(nx)
+    ZI, XI = np.meshgrid(zi_all, xi_all, indexing="ij")
+    grid_coords = np.stack([ZI.ravel(), XI.ravel()], axis=1)
+
+    T_oi = griddata(pts, inp_np[0][pts[:, 0], pts[:, 1]],
+                    grid_coords, method="cubic", fill_value=0.0)
+    S_oi = griddata(pts, inp_np[1][pts[:, 0], pts[:, 1]],
+                    grid_coords, method="cubic", fill_value=0.0)
+    return (T_oi.reshape(nz, nx).astype(np.float32),
+            S_oi.reshape(nz, nx).astype(np.float32))
 
 
 def compute_ssim(

@@ -272,6 +272,54 @@ align epoch counter with actual data passes:
 .venv/bin/python -m pytest tests/test_nc_advanced.py -v      # Preprocessing, multi-file, coordinates
 ```
 
+## Hydro T+S Pipeline
+
+Train a dual-head generator (T+S) with physical losses on synthetic Baltic data.
+Ported from `bin/todo/hydro_attention.py`.
+
+### Key differences from standard pipeline
+
+| Aspect | Standard | Hydro T+S |
+|--------|----------|-----------|
+| Input channels | 3 (\|V\|, thetao, so) + 1 mask | 8 (T_obs, S_obs, mask_ctd, mask_cmems, u_lr, v_lr, bathy, sigma) |
+| Output channels | 3 | 2 (T, S) |
+| Generator | FFCResNet | HydroGenerator (530K params) |
+| Data source | NetCDF files | Synthetic Baltic (no files needed) |
+| Losses | L1 + L2 + adversarial | L1 + L2 + adversarial + stability + BBL + geostrophic + inv-var MSE |
+
+### Training commands
+
+```bash
+# Smoke test (1 epoch, batch_size=1)
+.venv/bin/python bin/train.py --config-name=nc/training/hydro_T_S \
+  data=/nc/data/synthetic_baltic \
+  data.nc.data.batch_size=1 \
+  data.nc.data.val_batch_size=1 \
+  trainer.kwargs.max_epochs=1 \
+  trainer.kwargs.limit_train_batches=2 \
+  trainer.kwargs.val_check_interval=2 \
+  trainer.kwargs.num_sanity_val_steps=0
+
+# Full synthetic training (400 samples, 40 epochs)
+.venv/bin/python bin/train.py --config-name=nc/training/hydro_T_S \
+  data=/nc/data/synthetic_baltic
+```
+
+### Batch format
+
+The `HydroSyntheticDataset` returns batches with extra keys consumed by
+the physical loss functions:
+
+| Key | Shape | Used by |
+|-----|-------|---------|
+| `image` | (B, 8, H, W) | Generator input |
+| `target` | (B, 2, H, W) | L1/L2/adversarial losses |
+| `mask` | (B, 1, H, W) | Below-bottom mask |
+| `sigma_obs` | (B, 1, H, W) | `inverse_variance_mse` |
+| `obs_mask` | (B, 1, H, W) | `inverse_variance_mse` |
+| `u_input` | (B, 1, H, W) | `geostrophic_balance_loss` |
+| `bathy_indices` | (B, W) | `bottom_boundary_layer_loss` |
+
 ## File Structure
 
 ```

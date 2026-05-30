@@ -26,14 +26,24 @@ from .coordinates import (
     regrid_dataset,
 )
 from ..mask_generator import generate_mask
-from ..visualization import visualize_sample, plot_comparison
+from ..visualization import (
+    visualize_sample,
+    plot_comparison,
+    plot_netcdf_inference,
+    plot_input_channels,
+    plot_two_field_rows,
+    plot_fields_result,
+    plot_fields_error,
+)
 from .synthetic import (
     synthetic_TS_field,
     synthetic_V_field,
     sloping_bathymetry,
     make_synthetic_sample,
+    make_hydro_synthetic_sample,
+    sample_observations,
 )
-from .synthetic_dataset import SyntheticOceanDataset
+from .synthetic_dataset import SyntheticOceanDataset, HydroSyntheticDataset
 
 __all__ = [
     'load_netcdf',
@@ -61,9 +71,17 @@ __all__ = [
     'generate_vertical_mask',
     'visualize_sample',
     'plot_comparison',
+    'plot_netcdf_inference',
+    'plot_input_channels',
+    'plot_two_field_rows',
+    'plot_fields_result',
+    'plot_fields_error',
     'synthetic_TS_field',
     'synthetic_V_field',
     'sloping_bathymetry',
     'make_synthetic_sample',
+    'make_hydro_synthetic_sample',
+    'sample_observations',
     'SyntheticOceanDataset',
+    'HydroSyntheticDataset',
 ]
