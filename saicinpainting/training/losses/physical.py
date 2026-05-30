@@ -173,39 +173,47 @@ def hydrostatic_stability_loss(pred, channel_index=1, below_mask=None,
     return (unstable * mask).mean()
 
 
-def bottom_boundary_layer_loss(pred, bathy_indices, channel_index=1,
+def bottom_boundary_layer_loss(pred, bathy_indices, channel_index=0,
                                 salinity_index=None):
-    """Penalize non-zero vertical gradient near the bottom.
+    """Penalize non-zero vertical gradient of T (and optionally S) near the seabed.
 
-    In the bottom boundary layer, turbulent mixing homogenizes T and S,
-    so ∂T/∂z → 0 and ∂S/∂z → 0 at the seafloor.
+    Physically: turbulent mixing in the BBL homogenizes T and S →
+    ∂T/∂z → 0, ∂S/∂z → 0 at the bottom.
+
+    Uses torch.gather for differentiable indexing — no Python loops,
+    no .item() scalar extraction.
 
     Args:
-        pred:          (B, C, H, W) predicted field in [0, 1].
+        pred:          (B, C, H, W) predicted field, requires_grad=True.
         bathy_indices: (B, W) int tensor of bottom depth indices.
         channel_index: int, index of the temperature channel.
         salinity_index: int or None. If provided, also penalize ∂S/∂z.
 
     Returns:
-        Scalar loss.
+        Scalar loss (differentiable).
     """
-    B, _, H, W = pred.shape
+    B, C, H, W = pred.shape
 
-    total = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-    count = 0
+    zi = (bathy_indices.long() - 2).clamp(1, H - 2)
+    valid = (zi > 1) & (zi < H - 1)
 
-    for bi in range(B):
-        for xi in range(W):
-            zi = int(bathy_indices[bi, xi].item()) - 2
-            if 1 < zi < H - 1:
-                dT = pred[bi, channel_index, zi, xi] - pred[bi, channel_index, zi - 1, xi]
-                total = total + dT ** 2
-                count += 1
-                if salinity_index is not None:
-                    dS = pred[bi, salinity_index, zi, xi] - pred[bi, salinity_index, zi - 1, xi]
-                    total = total + dS ** 2
+    zi_exp = zi.unsqueeze(1).unsqueeze(2).expand(B, C, 1, W)
+    zi1_exp = (zi - 1).clamp(0).unsqueeze(1).unsqueeze(2).expand(B, C, 1, W)
 
-    return total / max(count, 1)
+    val_bot = pred.gather(2, zi_exp).squeeze(2)
+    val_above = pred.gather(2, zi1_exp).squeeze(2)
+
+    vf = valid.float()
+    dT = val_bot[:, channel_index, :] - val_above[:, channel_index, :]
+    loss = (dT ** 2 * vf).sum()
+    count = vf.sum().clamp(min=1)
+
+    if salinity_index is not None:
+        dS = val_bot[:, salinity_index, :] - val_above[:, salinity_index, :]
+        loss = loss + (dS ** 2 * vf).sum()
+        count = count * 2
+
+    return loss / count
 
 
 def observation_weighted_mse(pred, target, obs_mask, below_mask=None,

@@ -160,11 +160,13 @@ def run_inference(cfg: DictConfig):
             masked_np[0, mask_2d > 0] = 0.0
 
             try:
+                clim = OmegaConf.to_object(cfg.colorbar) if "colorbar" in cfg else None
                 fig = plot_comparison(
                     original=orig_np,
                     masked=masked_np,
                     result=inp_np,
                     titles=["Original", "Masked", "Inpainted"],
+                    clim=clim,
                 )
                 fig.savefig(out_path / f"{base_name}.png", dpi=150, bbox_inches="tight")
                 import matplotlib.pyplot as plt

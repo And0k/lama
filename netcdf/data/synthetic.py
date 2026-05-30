@@ -263,7 +263,10 @@ def sample_observations(
     """Sample random observation positions and generate noisy values.
 
     Generates CTD profiles (vertical lines at random x) and CMEMS
-    points (sparse log-spaced grid) with Gaussian measurement noise.
+    points (sparse log-spaced grid) with gradient-dependent Gaussian
+    measurement noise.  Noise is scaled by local gradient magnitude:
+    sharper thermocline/halocline → higher noise (realistic for CTD
+    instruments crossing sharp fronts).
 
     Args:
         T: (nz, nx) ground truth temperature in [0, 1].
@@ -275,8 +278,8 @@ def sample_observations(
         n_ctd: Number of CTD profiles.
         n_cmems_x: Number of CMEMS x-columns.
         n_cmems_z: Number of CMEMS z-levels.
-        noise_ctd: CTD measurement noise σ.
-        noise_cmems: CMEMS measurement noise σ.
+        noise_ctd: Base CTD measurement noise σ.
+        noise_cmems: Base CMEMS measurement noise σ.
         rng: Seeded NumPy generator.
 
     Returns:
@@ -285,6 +288,12 @@ def sample_observations(
     """
     if rng is None:
         rng = np.random.default_rng(42)
+
+    # Gradient-dependent noise scaling: higher noise at sharp gradients
+    grad_T = np.sqrt(np.gradient(T, axis=0)**2 + np.gradient(T, axis=1)**2)
+    grad_S = np.sqrt(np.gradient(S, axis=0)**2 + np.gradient(S, axis=1)**2)
+    grad_mean = (grad_T.mean() + grad_S.mean()) * 0.5 + 1e-6
+    noise_scale = 1.0 + 2.0 * (grad_T + grad_S) * 0.5 / grad_mean  # (nz, nx)
 
     T_obs = np.zeros((nz, nx), np.float32)
     S_obs = np.zeros((nz, nx), np.float32)
@@ -298,12 +307,13 @@ def sample_observations(
         if d < 2:
             continue
         mask_ctd[:d, xi] = 1.0
-        sigma_obs[:d, xi] = noise_ctd
+        local_scale = noise_scale[:d, xi].astype(np.float32)
+        sigma_obs[:d, xi] = noise_ctd * local_scale
         T_obs[:d, xi] = np.clip(
-            T[:d, xi] + rng.normal(0, noise_ctd, d).astype(np.float32), 0, 1
+            T[:d, xi] + rng.normal(0, 1, d).astype(np.float32) * noise_ctd * local_scale, 0, 1
         )
         S_obs[:d, xi] = np.clip(
-            S[:d, xi] + rng.normal(0, noise_ctd, d).astype(np.float32), 0, 1
+            S[:d, xi] + rng.normal(0, 1, d).astype(np.float32) * noise_ctd * local_scale, 0, 1
         )
 
     cmems_z_raw = np.logspace(0, np.log10(max(nz - 1, 1)), n_cmems_z)
@@ -314,12 +324,13 @@ def sample_observations(
         for xi in cmems_xs:
             if not below[zi, xi] and mask_ctd[zi, xi] < 0.5:
                 mask_cmems[zi, xi] = 1.0
-                sigma_obs[zi, xi] = noise_cmems
+                local_scale = float(noise_scale[zi, xi])
+                sigma_obs[zi, xi] = noise_cmems * local_scale
                 T_obs[zi, xi] = np.clip(
-                    T[zi, xi] + np.float32(rng.normal(0, noise_cmems)), 0, 1
+                    T[zi, xi] + np.float32(rng.normal(0, noise_cmems * local_scale)), 0, 1
                 )
                 S_obs[zi, xi] = np.clip(
-                    S[zi, xi] + np.float32(rng.normal(0, noise_cmems)), 0, 1
+                    S[zi, xi] + np.float32(rng.normal(0, noise_cmems * local_scale)), 0, 1
                 )
 
     return T_obs, S_obs, mask_ctd, mask_cmems, sigma_obs

@@ -386,6 +386,37 @@ regrid_dataset("ocean_model_output.nc", "regular_latlon.nc",
                target_lat_size=180, target_lon_size=360)
 ```
 
+### `nc/visualization/default.yaml`
+
+Fixed colorbar limits for all visualization functions. When a value is
+`null`, the limit is auto-scaled from the data.
+
+```yaml
+# @package _group_
+colorbar:
+  T:         {vmin: null, vmax: null}   # Temperature [°C]
+  S:         {vmin: null, vmax: null}   # Salinity [PSU]
+  u:         {vmin: null, vmax: null}   # Zonal velocity [m/s]
+  v:         {vmin: null, vmax: null}   # Meridional velocity [m/s]
+  error:     {emax: null}               # Symmetric error limit (±emax) °C or PSU
+```
+
+**Override examples:**
+```bash
+# Fix T colorbar to 0–20 °C
+python bin/demo_nc.py colorbar.T.vmin=0 colorbar.T.vmax=20
+
+# Fix error display to ±1.5
+python notebooks/train_hydro_colab.py colorbar.error.emax=1.5
+```
+
+Functions that accept `clim`: `plot_slice`, `plot_comparison`,
+`plot_input_channels`, `plot_netcdf_inference`, `plot_two_field_rows`,
+`plot_fields_result`, `plot_fields_error`.  Callers in `bin/demo_nc.py`,
+`bin/demo_nc_attention.py`, `bin/predict_nc.py`, and
+`notebooks/train_hydro_colab.py` read `colorbar` from the Hydra config
+automatically.
+
 ## Hydro T+S Pipeline
 
 ### Overview
@@ -395,46 +426,92 @@ on synthetic Baltic Sea data. Ported from `bin/todo/hydro_attention.py`.
 
 | Config | Purpose |
 |--------|---------|
-| `nc/training/hydro_T_S.yaml` | Full training config (losses, model, data) |
-| `nc/training/generator/hydro.yaml` | HydroGenerator (8ch→2ch, 530K params) |
+| `nc/training/hydro_train.yaml` | Training config (epochs, lr, model capacity, augmentation) |
+| `nc/training/generator/hydro.yaml` | HydroGenerator (8ch→2ch, configurable capacity) |
 | `nc/training/discriminator/hydro.yaml` | PatchGAN discriminator (2ch input) |
 | `nc/data/synthetic_baltic.yaml` | Baltic synthetic dataset (no NetCDF files needed) |
 
-### Architecture: HydroGenerator (530K params)
+### Architecture: HydroGenerator (LaMa-lite with FFCResBlock)
 
 - 8 input channels: `[T_obs, S_obs, mask_ctd, mask_cmems, u_lr, v_lr, bathymetry, sigma_obs]`
 - 2 output channels: `[T_pred, S_pred]`
-- Encoder → N × SimpleResBlock → dual T/S heads → TSCrossAttention → Sigmoid
+- Encoder → N × FFCResBlock (local 3×3 + FFT global) → dual T/S heads → TSCrossAttention → Sigmoid
+- `FFCResBlock`: explicit local/global channel split via `ratio_g`, Fourier mixing without activation in freq domain
 - `TSCrossAttention`: channel-wise cross-attention (T gates S, S gates T)
+- Configurable via `base_ch` (default 32), `n_blocks` (default 6), `ratio_g` (default 0.5)
+- 254.9K params (base_ch=32, n_blocks=6) — 2× smaller than SimpleResBlock version
 
-### Physical Losses
+### Generalization Features
 
-| Loss | Weight | Formula |
-|------|--------|---------|
+| Feature | Description |
+|---------|-------------|
+| **Uncertainty weighting** | Learnable `log_vars` (Kendall & Gal 2017) — 6 loss terms auto-balanced |
+| **OneCycleLR** | Cosine annealing with 10% warmup, replaces bare Adam |
+| **FFCResBlock** | Local 3×3 + Fourier global branch (ratio_g=0.5), no Dropout2d needed |
+| **Physical augmentation** | Horizontal flip, amplitude scaling ±20%, random CTD dropout |
+| **Curriculum learning** | n_ctd ∈ {2..7}, linearly reduced over training |
+| **OOD validation** | Separate stress-mode val set, logged as `ood_val_loss` |
+| **Gradient-dependent noise** | σ scaled by local gradient magnitude (sharper thermocline → more noise) |
+| **Model capacity** | Configurable `base_ch`/`n_blocks` (default 255K params) |
+
+### Physical Losses (with uncertainty weighting)
+
+Loss weights are learned automatically via `log_vars`. Initial sigma = 1.0 for all terms.
+Smoothness (TV) stays outside uncertainty weighting with fixed weight.
+
+| Loss | Initial σ | Formula |
+|------|-----------|---------|
+| `obs_l1` | 1.0 | L1 at observation points |
+| `domain_l1` | 1.0 | L1 in water domain |
 | `inverse_variance_mse` | 1.0 | MSE weighted by 1/σ² |
-| `stability` | 0.3 | ReLU(-∂ρ(T,S)/∂z) with full EOS |
-| `bbl` | 0.2 | (∂T/∂z)² + (∂S/∂z)² at seabed |
-| `geostrophic` | 0.15 | ∂ρ/∂x + ∂u/∂z anti-correlation |
-| `smoothness` | 1.0 | Total variation regularization |
+| `stability` | 1.0 | ReLU(-∂ρ(T,S)/∂z) with full EOS |
+| `bbl` | 1.0 | (∂T/∂z)² + (∂S/∂z)² at seabed |
+| `geostrophic` | 1.0 | ∂ρ/∂x + ∂u/∂z anti-correlation |
+| `smoothness` | fixed | Total variation regularization |
+
+### Hydro Training Config (`hydro_train.yaml`)
+
+```yaml
+# Training
+epochs: 40
+batch_size: 4
+val_batch_size: 2
+lr: 2e-4
+seed: 42
+
+# Model
+base_ch: 32       # Base channel count (reduce for small datasets)
+n_blocks: 6       # Number of residual blocks
+ratio_g: 0.5      # Fraction of channels for global (Fourier) branch
+
+# Data
+n_train: 400
+n_val: 80
+nx: 64
+nz: 64
+augment: true     # Physical augmentation
+lazy: true        # On-the-fly scene generation (infinite diversity)
+
+# Visualization
+viz_every: 5
+```
 
 ### Training Commands
 
 ```bash
 # Smoke test (synthetic data, 1 epoch, batch_size=1)
 source .venv/bin/activate
-.venv/bin/python bin/train.py --config-name=nc/training/hydro_T_S \
-  data=/nc/data/synthetic_baltic \
-  data.nc.data.batch_size=1 \
-  data.nc.data.val_batch_size=1 \
-  trainer.kwargs.max_epochs=1 \
-  trainer.kwargs.limit_train_batches=2 \
-  trainer.kwargs.val_check_interval=2
+python notebooks/train_hydro_colab.py epochs=1 batch_size=1 n_train=8 n_val=4
 
-# Full synthetic training
-.venv/bin/python bin/train.py --config-name=nc/training/hydro_T_S \
-  data=/nc/data/synthetic_baltic
+# Small model (for small datasets, ~28K params)
+python notebooks/train_hydro_colab.py base_ch=16 n_blocks=2
 
-# Real NetCDF data (requires CMEMS file)
-.venv/bin/python bin/train.py --config-name=nc/training/hydro_T_S \
-  'data.nc.data.dataset.filepaths=["/path/to/cmems.nc"]'
+# Full training with defaults (lazy mode, infinite diversity)
+python notebooks/train_hydro_colab.py epochs=40 batch_size=4
+
+# Stage training: auto-resumes from best checkpoint
+python notebooks/train_hydro_colab.py epochs=60
+
+# Disable augmentation
+python notebooks/train_hydro_colab.py augment=false
 ```

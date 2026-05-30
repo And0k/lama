@@ -88,7 +88,7 @@ class TestPlotInputChannels:
 
         try:
             plot_input_channels(
-                u, T, v, S,
+                T, S, u, v,
                 bathy=bathy, mask_ctd=mask_ctd, mask_cmems=mask_cmems,
                 save_path=path,
             )

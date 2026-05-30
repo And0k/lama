@@ -1,6 +1,10 @@
 # Prediction configuration for NetCDF oceanographic data
 # This file uses the nc data config group
 
+defaults:
+  - /nc/visualization/default
+  - _self_
+
 # Dataset configuration
 dataset:
   filepaths: []  # Required: set via CLI override

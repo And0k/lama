@@ -2,6 +2,7 @@
 
 defaults:
   - /nc/data/default
+  - /nc/visualization/default
   - _self_
 
 # Scaling overrides: add |V|, keep all others from the data default

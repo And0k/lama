@@ -2,6 +2,7 @@
 # Override via CLI: python notebooks/train_hydro_colab.py epochs=10 batch_size=8
 
 defaults:
+  - /nc/visualization/default
   - _self_
 
 # Training
@@ -11,14 +12,39 @@ val_batch_size: 2
 lr: 2e-4
 seed: 42
 
+# Model
+base_ch: 32
+n_blocks: 6
+ratio_g: 0.5
+
 # Data
 n_train: 400
 n_val: 80
 nx: 64
 nz: 64
+augment: true
+lazy: true            # On-the-fly scene generation (infinite diversity)
+n_ctd: 5              # CTD profiles per sample (also max for curriculum)
+n_cmems_x: 8          # CMEMS columns per sample
+n_cmems_z: 10         # CMEMS depth levels per sample
+noise_ctd: 0.05       # CTD measurement noise sigma
+noise_cmems: 0.10     # CMEMS measurement noise sigma
+mode_mix:             # Scene mode mixture (dict mapping mode -> probability)
+  realistic: 0.7
+  extended: 0.2
+  stress: 0.1
 
 # Visualization
 viz_every: 5
+
+# Physical scaling ranges for denormalizing [0,1] → physical units in plots.
+# These match the Baltic climatology ranges used by HydroSyntheticDataset.
+# Override for different regions: data_scaling.T=[-5,30]
+data_scaling:
+  T: [-2.0, 22.0]
+  S: [0.0, 35.0]
+  u: [-1.0, 1.0]
+  v: [-1.0, 1.0]
 
 # Output (date-based, auto-resume from best checkpoint in same dir)
 # Leave empty to auto-generate from date: hydro_YYYY-MM-DD

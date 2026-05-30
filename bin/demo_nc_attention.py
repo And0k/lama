@@ -76,15 +76,16 @@ def _generate_sample(cfg: DictConfig, device: torch.device):
     return batch
 
 
-@hydra.main(config_path="../configs/nc/training", config_name="hydro_train",
+@hydra.main(config_path="../configs", config_name="nc/training/hydro_train",
             version_base=None)
 def main(cfg: DictConfig) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info("Device: %s", device)
 
     cfg_dict = {k: v for k, v in OmegaConf.to_container(cfg, resolve=True).items()
-                if not k.startswith("_")}
+                 if not k.startswith("_")}
     outdir = cfg_dict.get("outdir", "")
+    clim = cfg_dict.get("colorbar")
     if not outdir:
         outdir = str(Path(PROJECT_ROOT) / "outputs" / f"hydro_{__import__('datetime').date.today()}")
     outdir = Path(outdir)
@@ -143,41 +144,47 @@ def main(cfg: DictConfig) -> None:
 
         suffix = f"sample{i:03d}"
 
+        mask_ctd=inp_np[0, 2]
+        mask_cmems=inp_np[0, 3]
+        bathy_arr=inp_np[0, 6, 0, :]
+        T_obs = inp_np[0, 0]
+        S_obs = inp_np[0, 1]
+
         # Input channels
         plot_input_channels(
-            inp_np[0, 4], inp_np[0, 0], inp_np[0, 5], inp_np[0, 1],
-            bathy=inp_np[0, 6, 0, :],
-            mask_ctd=inp_np[0, 2], mask_cmems=inp_np[0, 3],
+            T_obs=T_obs,
+            S_obs=S_obs,
+            u=inp_np[0, 4],
+            v=inp_np[0, 5],
+            bathy=bathy_arr,
+            mask_ctd=inp_np[0, 2],
+            mask_cmems=inp_np[0, 3],
             below=below_np,
             suptitle=f"Sample {i} — inputs",
             save_path=str(viz_dir / f"input_{suffix}.png"),
+            clim=clim,
         )
+        # OI and LaMa fields and error heatmaps
+        for method, TS in (("OI", (oi_T, oi_S)), ("LaMa", (pred[0, 0], pred[0, 1]))):
+            for b_error_plot, fun in ((False, plot_fields_result), (True, plot_fields_error)):
+                fun(
+                    *TS,
+                    T_obs=T_obs,
+                    S_obs=S_obs,
+                    T_bg=tgt_np[0, 0] if b_error_plot else None,
+                    S_bg=tgt_np[0, 1] if b_error_plot else None,
+                    method=method,
+                    below=below_np,
+                    mask_ctd=mask_ctd,
+                    mask_cmems=mask_cmems,
+                    bathy=bathy_arr,
+                    output_dir=str(viz_dir),
+                    suffix=suffix,
+                    suptitle=f"Sample {i} — {method}{' error' if b_error_plot else ''}",
+                    clim=clim,
+                )
 
-        # OI and LaMa fields
-        plot_fields_result(
-            oi_T, oi_S, method="oi", below=below_np,
-            output_dir=str(viz_dir), suffix=suffix,
-            suptitle=f"Sample {i} — OI",
-        )
-        plot_fields_result(
-            pred[0, 0], pred[0, 1], method="lama", below=below_np,
-            output_dir=str(viz_dir), suffix=suffix,
-            suptitle=f"Sample {i} — LaMa",
-        )
 
-        # Error heatmaps
-        plot_fields_error(
-            oi_T - tgt_np[0, 0], oi_S - tgt_np[0, 1],
-            method="oi", below=below_np,
-            output_dir=str(viz_dir), suffix=suffix,
-            suptitle=f"Sample {i} — OI error",
-        )
-        plot_fields_error(
-            pred[0, 0] - tgt_np[0, 0], pred[0, 1] - tgt_np[0, 1],
-            method="lama", below=below_np,
-            output_dir=str(viz_dir), suffix=suffix,
-            suptitle=f"Sample {i} — LaMa error",
-        )
 
         # Metrics
         for name, p, t in [("T", pred[0, 0], tgt_np[0, 0]),

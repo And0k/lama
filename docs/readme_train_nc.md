@@ -283,27 +283,66 @@ Ported from `bin/todo/hydro_attention.py`.
 |--------|----------|-----------|
 | Input channels | 3 (\|V\|, thetao, so) + 1 mask | 8 (T_obs, S_obs, mask_ctd, mask_cmems, u_lr, v_lr, bathy, sigma) |
 | Output channels | 3 | 2 (T, S) |
-| Generator | FFCResNet | HydroGenerator (530K params) |
+| Generator | FFCResNet | HydroGenerator (FFCResBlock, 28K–255K params) |
 | Data source | NetCDF files | Synthetic Baltic (no files needed) |
-| Losses | L1 + L2 + adversarial | L1 + L2 + adversarial + stability + BBL + geostrophic + inv-var MSE |
+| Losses | L1 + L2 + adversarial | 6 physics losses with learned uncertainty weighting |
+| Optimizer | Adam | Adam + OneCycleLR (10% warmup, cosine annealing) |
+| Regularization | — | Fourier global branch, augmentation, curriculum learning |
 
 ### Training commands
 
 ```bash
 # Smoke test (1 epoch, batch_size=1)
-.venv/bin/python bin/train.py --config-name=nc/training/hydro_T_S \
-  data=/nc/data/synthetic_baltic \
-  data.nc.data.batch_size=1 \
-  data.nc.data.val_batch_size=1 \
-  trainer.kwargs.max_epochs=1 \
-  trainer.kwargs.limit_train_batches=2 \
-  trainer.kwargs.val_check_interval=2 \
-  trainer.kwargs.num_sanity_val_steps=0
+source .venv/bin/activate
+python notebooks/train_hydro_colab.py epochs=1 batch_size=1 n_train=8 n_val=4
 
-# Full synthetic training (400 samples, 40 epochs)
-.venv/bin/python bin/train.py --config-name=nc/training/hydro_T_S \
-  data=/nc/data/synthetic_baltic
+# Small model (for ≤100 samples, ~28K params)
+python notebooks/train_hydro_colab.py base_ch=16 n_blocks=2
+
+# Full training with defaults (255K params, lazy mode)
+python notebooks/train_hydro_colab.py epochs=40 batch_size=4
+
+# Stage training: resume from checkpoint, more epochs
+python notebooks/train_hydro_colab.py epochs=60 n_train=400
+# (auto-resumes from best checkpoint, cleans up worse ones)
+
+# Custom observation noise and CTD density
+python notebooks/train_hydro_colab.py noise_ctd=0.08 noise_cmems=0.15 n_ctd=7
+
+# Custom mode mix (more hard cases)
+python notebooks/train_hydro_colab.py \
+  'mode_mix={realistic:0.3,extended:0.3,stress:0.4}'
+
+# Custom CMEMS grid density
+python notebooks/train_hydro_colab.py n_cmems_x=12 n_cmems_z=15
+
+# Disable augmentation
+python notebooks/train_hydro_colab.py augment=false
+
+# Pre-generated mode (finite diversity, exact reproducibility)
+python notebooks/train_hydro_colab.py lazy=false n_train=400
 ```
+
+### Lazy mode (default)
+
+With `lazy=True`, scenes are generated on-the-fly in `__getitem__` instead of
+pre-generated at init.  Each access creates a fresh scene from a deterministic
+seed `hash(idx, epoch)` — the model never sees the same T/S field twice across
+epochs.  This gives **infinite effective diversity** with zero memory overhead.
+
+| Mode | Unique targets/epoch | Memory | Reproducibility |
+|------|---------------------|--------|-----------------|
+| `lazy=true` (default) | n_train × epochs (unlimited) | ~0 MB (ephemeral) | Per-epoch deterministic |
+| `lazy=false` | n_train × n_variants (fixed) | ~280 KB × n_train | Exact bitwise |
+
+Val datasets always use `lazy=false` for stable metrics.
+
+### Checkpoint management
+
+- `save_top_k=10`: PL keeps the 10 best checkpoints by val_loss
+- On resume: all worse checkpoints are deleted (keeping only the best)
+- Flat filename layout: `hydro-{epoch:02d}-val_loss={value:.4f}.ckpt`
+- Auto-resume: scans `checkpoints/` for lowest val_loss, loads it automatically
 
 ### Batch format
 

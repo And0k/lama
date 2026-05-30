@@ -1,7 +1,8 @@
-"""General utilities for NetCDF tensor operations."""
+"""General utilities for NetCDF tensor operations and training."""
 
 import logging
-from typing import Tuple
+from pathlib import Path
+from typing import Optional, Tuple
 
 import torch
 
@@ -35,3 +36,60 @@ def pad_to_modulo(
         torch.nn.functional.pad(tensor, (0, pad_W, 0, pad_H), mode=mode),
         (H, W),
     )
+
+
+# ── Checkpoint utilities ────────────────────────────────────────────────────
+
+
+def _parse_val_loss(path: Path) -> float:
+    """Extract val_loss from a flat checkpoint filename.
+
+    Expected format: ``hydro-{epoch:02d}-val_loss={value:.4f}.ckpt``
+    Also handles legacy format: ``hydro-epoch=00-val_loss=2.7003.ckpt``
+    """
+    try:
+        s = path.stem
+        return float(s.split("val_loss=")[-1])
+    except (IndexError, ValueError):
+        return float("inf")
+
+
+def find_best_checkpoint(ckpt_dir: Path) -> Optional[Path]:
+    """Return checkpoint with lowest val_loss, or None.
+
+    Searches ``ckpt_dir`` for files matching ``hydro-*.ckpt`` (flat layout).
+    Parses val_loss from the filename.
+
+    Args:
+        ckpt_dir: Directory containing checkpoint files.
+
+    Returns:
+        Path to checkpoint with lowest val_loss, or None.
+    """
+    candidates = sorted(ckpt_dir.glob("hydro-*.ckpt"))
+    if not candidates:
+        return None
+    return min(candidates, key=_parse_val_loss)
+
+
+def cleanup_checkpoints(ckpt_dir: Path, max_keep: int = 10) -> int:
+    """Delete worst checkpoints, keeping only the best *max_keep*.
+
+    Args:
+        ckpt_dir: Directory containing checkpoint files.
+        max_keep: Number of best checkpoints to keep.
+
+    Returns:
+        Number of checkpoint files deleted.
+    """
+    candidates = sorted(ckpt_dir.glob("hydro-*.ckpt"), key=_parse_val_loss)
+    if len(candidates) <= max_keep:
+        return 0
+    to_remove = candidates[max_keep:]
+    for p in to_remove:
+        try:
+            p.unlink()
+            logger.info("Removed checkpoint: %s", p.name)
+        except OSError:
+            logger.debug("Could not remove %s", p)
+    return len(to_remove)

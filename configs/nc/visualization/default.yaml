@@ -1,0 +1,26 @@
+# @package _group_
+# Colorbar limits for visualization functions.
+# Values are in physical units (°C, PSU, m/s for real NetCDF data;
+# or the same physical scale for synthetic data after scaling/denormalization).
+# Set to null (None) for auto-scaling from data.
+
+colorbar:
+  # Temperature
+  T:
+    vmin: null
+    vmax: null
+  # Salinity
+  S:
+    vmin: null
+    vmax: null
+  # Zonal velocity
+  u:
+    vmin: null
+    vmax: null
+  # Meridional velocity
+  v:
+    vmin: null
+    vmax: null
+  # Error (symmetric around zero for divergent colormaps)
+  error:
+    emax: 0.5

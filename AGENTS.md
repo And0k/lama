@@ -14,4 +14,4 @@ Tests: always first batch_size=1, max_epochs=1.
 
 
 Document configuration changes in configs/README.md so others can replicate.
-Keep README_nc.md, readme_train_nc.md, README_monitor_nc.md about netcdf pipeline up to date
+Keep up to date netcdf/hydro pipeline docs/ README_nc.md, readme_train_nc.md, README_monitor_nc.md, ...

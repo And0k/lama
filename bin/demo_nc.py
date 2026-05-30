@@ -80,6 +80,7 @@ def demo_inference(nc_file: str, cfg: DictConfig) -> None:
     computed_vars = OmegaConf.to_object(cfg.computed_variables)
     horizontal_mask_cfg = OmegaConf.to_object(cfg.mask_generator)
     vertical_mask_cfg = OmegaConf.to_object(cfg.vertical_mask)
+    clim = OmegaConf.to_object(cfg.colorbar) if "colorbar" in cfg else None
 
     output_channels = resolve_output_channels(nc_file, cfg.output_channels)
     log.info("Output channels: %s", [ch["name"] for ch in output_channels])
@@ -171,6 +172,7 @@ def demo_inference(nc_file: str, cfg: DictConfig) -> None:
                 ssim_val=ssim_val,
                 units=units,
                 suptitle=f"projection={proj_name}  sample={i}",
+                clim=clim,
             )
 
             fig_path = out_dir / f"{proj_name}_3ch_t0_{dim_y}{orig_H}_{dim_x}{orig_W}_sample{i}.png"
