@@ -1,50 +1,79 @@
-# Hydro T+S training defaults
+# @package _global_
+# Hydro T+S training defaults — CTD dropout + 3-loss pipeline
 # Override via CLI: python notebooks/train_hydro_colab.py epochs=10 batch_size=8
 
 defaults:
-  - /nc/visualization/default
+  - /nc/visualization/default     # colorbar limits for viz
   - _self_
 
 # Training
-epochs: 40
-batch_size: 4
-val_batch_size: 2
-lr: 2e-4
-seed: 42
+epochs: 40                        # total training epochs
+batch_size: 4                     # training micro-batch size
+val_batch_size: 2                 # validation micro-batch size
+lr: 2e-4                          # peak learning rate (OneCycleLR)
+seed: 42                          # master RNG seed
 
 # Model
-base_ch: 32
-n_blocks: 6
-ratio_g: 0.5
+base_ch: 32                       # base channel count (reduce for small datasets)
+n_blocks: 6                       # number of FFCResBlocks
+ratio_g: 0.5                      # fraction of channels for global (Fourier) branch
 
-# Data
-n_train: 400
-n_val: 80
-nx: 64
-nz: 64
-augment: true
-lazy: true            # On-the-fly scene generation (infinite diversity)
-n_ctd: 5              # CTD profiles per sample (also max for curriculum)
-n_cmems_x: 8          # CMEMS columns per sample
-n_cmems_z: 10         # CMEMS depth levels per sample
-noise_ctd: 0.05       # CTD measurement noise sigma
-noise_cmems: 0.10     # CMEMS measurement noise sigma
-mode_mix:             # Scene mode mixture (dict mapping mode -> probability)
+# Data — training dataset
+n_train: 400                      # training dataset length (scenes when lazy=True)
+n_val: 80                         # validation dataset length
+nx: 64                            # horizontal grid points per scene
+nz: 64                            # vertical grid points per scene
+augment: true                     # physical augmentation (flip, amplitude scale)
+lazy: true                        # on-the-fly scene generation (infinite diversity)
+mode_mix:                         # scene mode mixture (must sum to 1)
+  realistic: 0.7                  # climatological Baltic ranges
+  extended: 0.2                   # ×1.5 wider ranges, stronger slopes
+  stress: 0.1                     # extreme / rare physics
+num_workers: 4                    # DataLoader workers
+
+# CTD dropout training
+ctd_min: 0                        # minimum CTD profiles per sample
+ctd_max: 7                        # maximum CTD profiles per sample
+
+# CMEMS background
+n_cmems_x: 8                      # CMEMS sparse columns per sample
+n_cmems_z: 10                     # CMEMS depth levels per column
+noise_ctd: 0.05                   # CTD measurement noise σ
+noise_cmems: 0.10                 # CMEMS measurement noise σ
+cmems_smoothing_sigma: 2.0        # CMEMS background Gaussian filter σ
+cmems_shift_max_px: 6             # CMEMS background max vertical shift
+
+# Val dataset overrides (inherits train params, separate seed)
+val_seed_offset: 100              # val seed = seed + val_seed_offset
+val_n_ctd_list: [0, 1, 2, 3, 5, 7]  # n_ctd values for degradation curve
+val_mode_mix:                     # val scene distribution (default: same as train)
   realistic: 0.7
   extended: 0.2
   stress: 0.1
 
+# OOD (out-of-distribution) val dataset — stress-heavy, sparse obs
+ood_n_ratio: 0.5                  # ood n_val = int(n_val * ood_n_ratio)
+ood_seed_offset: 200              # ood seed = seed + ood_seed_offset
+ood_n_ctd: 2                      # fewer CTD profiles (harder inpainting)
+ood_noise_ctd: 0.08               # higher CTD noise σ
+ood_noise_cmems: 0.15             # higher CMEMS noise σ
+ood_mode_mix:                     # stress-dominant mode mixture
+  realistic: 0.0
+  extended: 0.3
+  stress: 0.7
+
 # Visualization
-viz_every: 5
+viz_every: 5                      # generate plots every N epochs
+viz_n_ctd: 3                      # CTD profiles in fixed visualization sample
 
 # Physical scaling ranges for denormalizing [0,1] → physical units in plots.
-# These match the Baltic climatology ranges used by HydroSyntheticDataset.
+# These match the Baltic climatology ranges used by HybridCTDDataset.
 # Override for different regions: data_scaling.T=[-5,30]
 data_scaling:
-  T: [-2.0, 22.0]
-  S: [0.0, 35.0]
-  u: [-1.0, 1.0]
-  v: [-1.0, 1.0]
+  T: [-2.0, 22.0]                 # temperature [°C]
+  S: [0.0, 35.0]                  # salinity [PSU]
+  u: [-1.0, 1.0]                  # zonal velocity [m/s]
+  v: [-1.0, 1.0]                  # meridional velocity [m/s]
 
 # Output (date-based, auto-resume from best checkpoint in same dir)
 # Leave empty to auto-generate from date: hydro_YYYY-MM-DD

@@ -123,7 +123,7 @@ def demo_inference(nc_file: str, cfg: DictConfig) -> None:
             proj_name, slice_mode, n_samples, C, dim_y, H, dim_x, W,
         )
 
-        dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
+        dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4)
         ssim_values = []
 
         for i, batch in enumerate(dataloader):

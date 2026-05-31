@@ -19,12 +19,83 @@ import torch
 from matplotlib.axes import Axes
 from matplotlib.colors import TwoSlopeNorm
 from matplotlib.figure import Figure
+from matplotlib.gridspec import GridSpec
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+from .eos import linearized_density
 
 logger = logging.getLogger(__name__)
 
 FILL_COLOR = "0.85"
 MASK_COLOR = "white"
+
+# ── Layout constants — single source of truth for all hydro plots ───────
+# All per-axes dimensions are derived from CELL_W × CELL_H so that every
+# plot type (2×2 inputs, 2×1 fields, n×3 inference) produces identically
+# sized imshow areas regardless of grid layout.
+CELL_W = 5.0  # single axes width  [inches]
+CELL_H = 4.5  # single axes height [inches]
+CBAR_W = 0.15  # colorbar width [inches]
+CBAR_PAD = 0.0  # gap between axes edge and colorbar [inches]
+
+
+def _figsize(
+    ncols: int, nrows: int, *, extra_w: float = 1.5, extra_h: float = 1.0, cbar_cols: int = 0
+) -> Tuple[float, float]:
+    """Compute figure size from grid dimensions.
+
+    Args:
+        ncols: Number of data columns in the grid.
+        nrows: Number of rows in the grid.
+        extra_w: Width reserved for y-axis labels and margins [inches].
+        extra_h: Height reserved for titles and x-axis labels [inches].
+        cbar_cols: Number of colorbar columns already included in the
+            GridSpec (their width is ``cbar_cols * CBAR_W``).
+
+    Returns:
+        (width, height) in inches for ``plt.figure(figsize=...)``.
+    """
+    w = ncols * CELL_W + cbar_cols * CBAR_W + extra_w
+    h = nrows * CELL_H + extra_h
+    return (w, h)
+
+
+def _prepare_2d_display(img: np.ndarray) -> np.ndarray:
+    """Collapse non-spatial dimensions for 2D rendering."""
+    if img.ndim != 3:
+        return img
+    channels, height, width = img.shape
+    match channels:
+        case 1:
+            return img[0]
+        case 3 | 4:
+            return np.transpose(img, (1, 2, 0))
+        case _:
+            return img[0]
+
+
+def _attach_external_colorbar(
+    ax: Axes, mappable: plt.cm.ScalarMappable, size: float = CBAR_W, pad: float = CBAR_PAD, **kwargs
+) -> None:
+    """Attach a colorbar flush against the plot.
+
+    Args:
+        ax: Parent axes.
+        mappable: Mappable for the colorbar.
+        size: Colorbar width as fraction of axes width.
+        pad: Gap between axes and colorbar.
+        **kwargs: Forwarded to ``plt.colorbar``.
+    """
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size=size, pad=pad)
+    plt.colorbar(mappable, cax=cax, **kwargs)
+
+
+def _mask_below(arr: np.ndarray, below: np.ndarray) -> np.ndarray:
+    """Set below-bottom pixels to NaN for masked rendering."""
+    v = arr.copy()
+    v[below] = np.nan
+    return v
 
 
 def _apply_scaling(
@@ -44,35 +115,6 @@ def _apply_scaling(
         return data
     vmin, vmax = rng
     return data * (vmax - vmin) + vmin
-
-
-def _prepare_2d_display(img: np.ndarray) -> np.ndarray:
-    """Collapse non-spatial dimensions for 2D rendering."""
-    if img.ndim != 3:
-        return img
-    channels, height, width = img.shape
-    match channels:
-        case 1:
-            return img[0]
-        case 3 | 4:
-            return np.transpose(img, (1, 2, 0))
-        case _:
-            return img[0]
-
-
-def _attach_external_colorbar(ax: Axes, mappable: plt.cm.ScalarMappable,
-                              **kwargs) -> None:
-    """Attach a colorbar outside the plotting area without shrinking the axes."""
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="5%", pad=0.12)
-    plt.colorbar(mappable, cax=cax, **kwargs)
-
-
-def _mask_below(arr: np.ndarray, below: np.ndarray) -> np.ndarray:
-    """Set below-bottom pixels to NaN for masked rendering."""
-    v = arr.copy()
-    v[below] = np.nan
-    return v
 
 
 def plot_slice(
@@ -120,7 +162,7 @@ def plot_comparison(
     *,
     titles: Optional[List[str]] = None,
     cmap: str = "viridis",
-    figsize: Tuple[int, int] = (15, 5),
+    figsize: Optional[Tuple[int, int]] = None,
     clim: Optional[Dict[str, Any]] = None,
     scaling: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> Figure:
@@ -128,12 +170,13 @@ def plot_comparison(
     resolved_titles = titles or ["Original", "Masked", "Result"]
     datasets = tuple(map(_prepare_2d_display, (original, masked, result)))
 
-    fig, axes = plt.subplots(1, 3, figsize=figsize, sharex="col", sharey="row")
+    fig, axes = plt.subplots(
+        1, 3, figsize=figsize if figsize is not None else _figsize(3, 1), sharex="col", sharey="row"
+    )
     fig.subplots_adjust(wspace=0.05)
 
     for ax, data, title in zip(axes, datasets, resolved_titles):
-        plot_slice(data, ax=ax, title=title, cmap=cmap, clim=clim, var_key="T",
-                   scaling=scaling)
+        plot_slice(data, ax=ax, title=title, cmap=cmap, clim=clim, var_key="T", scaling=scaling)
 
     for ax in axes.flat:
         ax.label_outer()
@@ -154,7 +197,7 @@ def plot_netcdf_inference(
     ssim_val: Optional[float] = None,
     units: Optional[Dict[str, str]] = None,
     suptitle: str = "",
-    figsize: Tuple[int, int] = (18, 15),
+    figsize: Optional[Tuple[int, int]] = None,
     clim: Optional[Dict[str, Any]] = None,
     scaling: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> Figure:
@@ -189,8 +232,12 @@ def plot_netcdf_inference(
     cmap_err = plt.cm.RdBu_r.copy()
 
     fig, axes = plt.subplots(
-        n_ch, 3, figsize=figsize,
-        sharex="col", sharey="row", constrained_layout=True,
+        n_ch,
+        3,
+        figsize=figsize if figsize is not None else _figsize(3, n_ch),
+        sharex="col",
+        sharey="row",
+        constrained_layout=True,
     )
     if n_ch == 1:
         axes = axes.reshape(1, -1)
@@ -215,9 +262,7 @@ def plot_netcdf_inference(
 
         err_cfg = (clim or {}).get("error") if clim else None
         cfg_emax = err_cfg.get("emax") if isinstance(err_cfg, dict) else None
-        emax = cfg_emax if cfg_emax is not None else (
-            float(np.nanmax(np.abs(err_water))) or 1.0
-        )
+        emax = cfg_emax if cfg_emax is not None else (float(np.nanmax(np.abs(err_water))) or 1.0)
         err_norm = TwoSlopeNorm(vmin=-emax, vcenter=0, vmax=emax)
 
         col_data = [
@@ -233,13 +278,19 @@ def plot_netcdf_inference(
                 display[fill_mask] = np.nan
 
             im = ax.imshow(
-                np.ma.masked_invalid(display), cmap=cmap, norm=norm,
-                vmin=v_min, vmax=v_max, aspect="auto", interpolation="none"
+                np.ma.masked_invalid(display),
+                cmap=cmap,
+                norm=norm,
+                vmin=v_min,
+                vmax=v_max,
+                aspect="auto",
+                interpolation="none",
             )
 
             if fill_mask.any() and col < 2:
                 fill_overlay = np.ma.masked_where(
-                    ~fill_mask, np.full_like(data_2d, 0.5),
+                    ~fill_mask,
+                    np.full_like(data_2d, 0.5),
                 )
                 ax.imshow(
                     fill_overlay,
@@ -254,7 +305,8 @@ def plot_netcdf_inference(
             # White obs mask on Original column, first variable only
             if col == 0 and ch_idx == 0:
                 obs_vis = np.ma.masked_where(
-                    mask_2d < 0.5, np.ones_like(mask_2d),
+                    mask_2d < 0.5,
+                    np.ones_like(mask_2d),
                 )
                 ax.imshow(
                     obs_vis, cmap="Greys", vmin=0, vmax=1, alpha=0.6, aspect="auto", interpolation="none"
@@ -269,7 +321,8 @@ def plot_netcdf_inference(
             ax.set_title(title)
 
         _attach_external_colorbar(
-            axes[ch_idx, 0], im,
+            axes[ch_idx, 0],
+            im,
             label=f"{var_names[ch_idx]}{unit_suffix}",
         )
         _attach_external_colorbar(
@@ -307,7 +360,7 @@ def plot_input_channels(
     below: Optional[np.ndarray] = None,
     suptitle: str = "",
     save_path: Optional[str] = None,
-    figsize: Tuple[int, int] = (14, 10),
+    figsize: Optional[Tuple[int, int]] = None,
     clim: Optional[Dict[str, Any]] = None,
     scaling: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> Figure:
@@ -316,9 +369,7 @@ def plot_input_channels(
     Row 0: u (bathymetry fill, location markers), T (background + obs overlay)
     Row 1: v, S (background + obs overlay)
 
-    Overlays on u/v panels: bathymetry gray fill, white CTD lines, CMEMS dots.
-    Overlays on T/S panels: observation values at mask positions (same colormap).
-    All panels: gray vertical lines in below-bottom region at CTD x-positions.
+    Layout: 2 data columns + 2 narrow colorbar columns per row via GridSpec.
 
     Args:
         T_obs, S_obs, u, v:   (H, W) — T/S sparse observation values, u/v velocity.
@@ -329,21 +380,23 @@ def plot_input_channels(
         below:        (H, W) bool, True = below bottom.
         suptitle:     Figure title.
         save_path:    If set, save PNG to this path.
-        figsize:      Figure size.
+        figsize:      Figure size (default: computed from CELL_W × CELL_H).
     """
-    fig, axes = plt.subplots(
-        2, 2, figsize=figsize, sharex="col", sharey="row",
-        constrained_layout={'w_pad': 0.15, 'h_pad': 0.04},
-    )
+    if figsize is None:
+        figsize = _figsize(2, 2, cbar_cols=2)
+    fig = plt.figure(figsize=figsize, constrained_layout=True)
+    gs = GridSpec(2, 4, figure=fig, width_ratios=[1, 0.05, 1, 0.05])
+    axes = np.array([[fig.add_subplot(gs[r, c * 2]) for c in range(2)] for r in range(2)])
+    cbar_axes = np.array([[fig.add_subplot(gs[r, c * 2 + 1]) for c in range(2)] for r in range(2)])
 
     panels = [
-        (axes[0, 0], u,                                    "u (velocity)",    "RdBu_r", "u"),
-        (axes[0, 1], T_bg if T_bg is not None else T_obs,      "T (temperature)", "plasma", "T"),
-        (axes[1, 0], v,                                    "v (velocity)",    "RdBu_r", "v"),
-        (axes[1, 1], S_bg if S_bg is not None else S_obs,      "S (salinity)",    "viridis", "S"),
+        (axes[0, 0], u, "u (velocity)", "RdBu_r", "u"),
+        (axes[0, 1], T_bg if T_bg is not None else T_obs, "T (temperature)", "plasma", "T"),
+        (axes[1, 0], v, "v (velocity)", "RdBu_r", "v"),
+        (axes[1, 1], S_bg if S_bg is not None else S_obs, "S (salinity)", "viridis", "S"),
     ]
 
-    for ax, field, title, cmap, var_key in panels:
+    for i, (ax, field, title, cmap, var_key) in enumerate(panels):
         display = _apply_scaling(field, scaling, var_key)
         if below is not None:
             display[below] = np.nan
@@ -351,12 +404,16 @@ def plot_input_channels(
         v_min = var_cfg.get("vmin") if isinstance(var_cfg, dict) else None
         v_max = var_cfg.get("vmax") if isinstance(var_cfg, dict) else None
         im = ax.imshow(
-            np.ma.masked_invalid(display), cmap=cmap, aspect="auto",
-            origin="upper", interpolation="none",
-            vmin=v_min, vmax=v_max,
+            np.ma.masked_invalid(display),
+            cmap=cmap,
+            aspect="auto",
+            origin="upper",
+            interpolation="none",
+            vmin=v_min,
+            vmax=v_max,
         )
         ax.set_title(title, fontsize=10)
-        _attach_external_colorbar(ax, im)
+        fig.colorbar(im, cax=cbar_axes[i // 2, i % 2])
 
     # ── Overlays ───────────────────────────────────────────────────────────
     H, W = u.shape
@@ -375,8 +432,9 @@ def plot_input_channels(
 
     if mask_cmems is not None:
         cmems_ys, cmems_xs = np.where(mask_cmems > 0.5)
-        ax_u.scatter(cmems_xs, cmems_ys, s=1.5, c="white", alpha=0.5,
-                     marker="o", linewidths=0)
+        ax_u.scatter(
+            cmems_xs, cmems_ys, s=3.5, c=None, alpha=1, marker="o", edgecolors="green", linewidths=0.5
+        )
 
     # T and S panels: observation values at mask positions over background
     obs_panels = [
@@ -387,16 +445,26 @@ def plot_input_channels(
         if mask_ctd is not None:
             obs = np.full((H, W), np.nan)
             obs[mask_ctd > 0.5] = obs_field[mask_ctd > 0.5]
-            ax.imshow(np.ma.masked_invalid(obs), cmap=cmap_name,
-                      aspect="auto", origin="upper", interpolation="none",
-                      alpha=0.9)
+            ax.imshow(
+                np.ma.masked_invalid(obs),
+                cmap=cmap_name,
+                aspect="auto",
+                origin="upper",
+                interpolation="none",
+                alpha=0.9,
+            )
 
         if mask_cmems is not None:
             obs = np.full((H, W), np.nan)
             obs[mask_cmems > 0.5] = obs_field[mask_cmems > 0.5]
-            ax.imshow(np.ma.masked_invalid(obs), cmap=cmap_name,
-                      aspect="auto", origin="upper", interpolation="none",
-                      alpha=0.7)
+            ax.imshow(
+                np.ma.masked_invalid(obs),
+                cmap=cmap_name,
+                aspect="auto",
+                origin="upper",
+                interpolation="none",
+                alpha=0.7,
+            )
 
     # All panels: gray vertical lines in below-bottom region at CTD x-positions
     if below is not None and bathy is not None and mask_ctd is not None:
@@ -405,8 +473,7 @@ def plot_input_channels(
             for xi in ctd_xs:
                 y_bathy = int(round(bathy[xi] * H))
                 if y_bathy < H:
-                    ax.plot([xi, xi], [y_bathy + 1, H - 1],
-                            color="0.5", linewidth=1.0, alpha=0.6)
+                    ax.plot([xi, xi], [y_bathy + 1, H - 1], color="0.5", linewidth=1.0, alpha=0.6)
 
     for ax in axes[-1]:
         ax.set_xlabel("x (distance)")
@@ -441,6 +508,7 @@ def plot_two_field_rows(
     mask_overlay: Optional[np.ndarray] = None,
     mask_ctd: Optional[np.ndarray] = None,
     bathy: Optional[np.ndarray] = None,
+    density_field: Optional[np.ndarray] = None,
     suptitle: str = "",
     save_path: Optional[str] = None,
     label_top: str = "",
@@ -460,6 +528,7 @@ def plot_two_field_rows(
         mask_overlay: (H, W) float — white overlay mask (e.g. obs locations).
         mask_ctd: (H, W) CTD mask — for below-bottom gray lines.
         bathy: (W,) normalised bottom depth — for below-bottom gray lines.
+        density_field: (H, W) optional density field for isoline overlay.
         suptitle: figure super-title.
         save_path: if set, save PNG.
         label_top, label_bottom: colorbar labels.
@@ -468,7 +537,11 @@ def plot_two_field_rows(
         matplotlib Figure.
     """
     fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(8, 9), sharex="col", constrained_layout=True,
+        2,
+        1,
+        figsize=_figsize(1, 2),
+        sharex="col",
+        constrained_layout=True,
     )
 
     for ax, field, title, vm, vM, cbar_label, var_key in [
@@ -496,8 +569,7 @@ def plot_two_field_rows(
         )
 
         if mask_overlay is not None:
-            ov = np.ma.masked_where(mask_overlay < 0.5,
-                                     np.ones_like(mask_overlay))
+            ov = np.ma.masked_where(mask_overlay < 0.5, np.ones_like(mask_overlay))
             ax.imshow(ov, cmap="Greys", vmin=0, vmax=1, alpha=0.6, aspect="auto", interpolation="none")
 
         ax.set_title(title, fontsize=10)
@@ -516,8 +588,21 @@ def plot_two_field_rows(
             for xi in ctd_xs:
                 y_bathy = int(round(bathy[xi] * H))
                 if y_bathy < H:
-                    ax.plot([xi, xi], [y_bathy + 1, H - 1],
-                            color="0.5", linewidth=1.0, alpha=0.6)
+                    ax.plot([xi, xi], [y_bathy + 1, H - 1], color="0.5", linewidth=1.0, alpha=0.6)
+
+    # Density isolines overlay (contour lines only)
+    if density_field is not None:
+        rho = np.ma.masked_invalid(density_field)
+        levels = np.linspace(np.nanmin(density_field), np.nanmax(density_field), 8)
+        for ax in (ax1, ax2):
+            ax.contour(
+                rho,
+                levels=levels,
+                colors="black",
+                linewidths=0.5,
+                alpha=0.4,
+                linestyles="solid",
+            )
 
     fig.suptitle(suptitle, fontsize=11)
 
@@ -546,21 +631,25 @@ def plot_fields_result(
     suptitle: str = "",
     clim: Optional[Dict[str, Any]] = None,
     scaling: Optional[Dict[str, Tuple[float, float]]] = None,
-    **kwargs  # not used
-
+    **kwargs,  # not used
 ) -> Figure:
     """Wrapper: save T+S result fields to ``{output_dir}/{method}_T_S_{suffix}.png``."""
     save_path = str(Path(output_dir) / f"{method.lower()}_T_S_{suffix}.png")
     return plot_two_field_rows(
-        T_field, S_field,
+        T_field,
+        S_field,
         title_top=f"{method} T",
         title_bottom=f"{method} S",
         cmap="plasma",
         below=below,
-        mask_ctd=mask_ctd, bathy=bathy,
-        vmin_top=vmin_T, vmax_top=vmax_T,
-        vmin_bottom=vmin_S, vmax_bottom=vmax_S,
-        label_top="T", label_bottom="S",
+        mask_ctd=mask_ctd,
+        bathy=bathy,
+        vmin_top=vmin_T,
+        vmax_top=vmax_T,
+        vmin_bottom=vmin_S,
+        vmax_bottom=vmax_S,
+        label_top="T",
+        label_bottom="S",
         suptitle=suptitle or f"{method} reconstruction",
         save_path=save_path,
         clim=clim,
@@ -630,6 +719,7 @@ def plot_fields_error(
         below=below,
         mask_ctd=mask_ctd,
         bathy=bathy,
+        density_field=linearized_density(T_bg, S_bg),
         vmin_top=-emax_T,
         vmax_top=emax_T,
         vmin_bottom=-emax_S,
@@ -664,7 +754,7 @@ def visualize_sample(
     masked_image = image_chan.copy()
     masked_image[mask_chan > 0] = np.nanmedian(image_chan)
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5), sharex="col", sharey="row")
+    fig, axes = plt.subplots(1, 3, figsize=_figsize(3, 1), sharex="col", sharey="row")
     fig.subplots_adjust(wspace=0.05)
 
     plot_slice(image_chan, ax=axes[0], title=f"Original (Ch {channel})")

@@ -1,0 +1,8 @@
+# @package _group_
+# HydroGenerator: LaMa-lite with FFCResBlock + dual T/S heads + cross-attention
+# From bin/todo/model.py — corrected FourierUnit (no activation in freq domain)
+kind: hydro
+in_ch: 8
+base_ch: 32
+n_blocks: 6
+ratio_g: 0.5

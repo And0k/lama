@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 try:
     from saicinpainting.training.data.masks import MixedMaskGenerator, SegmentationMask
 except ImportError:  # pragma: no cover
-    logger.warning("Could not import MixedMaskGenerator or SegmentationMask from saicinpainting")
     MixedMaskGenerator = None
     SegmentationMask = None
 

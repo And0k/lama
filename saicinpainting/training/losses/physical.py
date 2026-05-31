@@ -21,24 +21,9 @@ import logging
 import torch
 import torch.nn.functional as F
 
+from hydro_lama_nc.eos import linearized_density, ALPHA, BETA
+
 logger = logging.getLogger(__name__)
-
-
-def linearized_density(T, S, alpha=0.20, beta=0.08):
-    """Linearized equation of state for Baltic Sea.
-
-    ρ ≈ 1 - α·T + β·S  with T, S in [0, 1].
-
-    Args:
-        T: Temperature tensor, any shape.
-        S: Salinity tensor, same shape as T.
-        alpha: Thermal expansion coefficient.
-        beta: Haline contraction coefficient.
-
-    Returns:
-        Density tensor, same shape as T.
-    """
-    return 1.0 - alpha * T + beta * S
 
 
 def smoothness_loss(pred, mask=None):
@@ -128,7 +113,7 @@ def gradient_consistency_loss(pred, target=None, mask=None):
 
 
 def hydrostatic_stability_loss(pred, channel_index=1, below_mask=None,
-                                alpha=0.20, beta=0.08,
+                                alpha=ALPHA, beta=BETA,
                                 salinity_index=None):
     """Penalize density inversions (hydrostatic instability).
 

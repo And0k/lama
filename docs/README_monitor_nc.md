@@ -158,12 +158,24 @@ tensorboard --logdir <workdir>/tb_logs --port 6006
 ```bash
 # Export TensorBoard data to CSV for pandas/matplotlib analysis
 tensorboard --logdir <workdir>/tb_logs --port 6007
-# Then in Python:
+# Then in Python (paste your workdir and record name/version):
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
-ea = EventAccumulator("<workdir>/tb_logs/nc_training")
+ea = EventAccumulator(f"{workdir}/tb_logs/{name}/{version}")
 ea.Reload()
 scalars = ea.Tags()["scalars"]
-# ea.Scalars("train_l1_gen") returns list of WallTime, Step, Value
+import pandas as pd
+scalars_data = {}
+for tag in scalars:
+    events = ea.Scalars(tag)
+    scalars_data[tag] = pd.DataFrame({
+        'step': [e.step for e in events],
+        'value': [e.value for e in events],
+        'wall_time': [e.wall_time for e in events]
+    })
+    print(f"{tag}: {len(events)} points")
+# Example: plot training loss
+df_loss = scalars_data['train_loss_epoch']
+print(df_loss.head())
 ```
 
 ## PyTorch Lightning Checkpoints

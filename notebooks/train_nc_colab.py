@@ -58,13 +58,12 @@ log = logging.getLogger("train_nc")
 
 # Suppress noisy PL/torch warnings that are harmless in our setup:
 #  - LeafSpec deprecation: PyTorch 2.12 internal, not our code
-#  - num_workers bottleneck: we use 0 intentionally for netCDF safety
+#  - num_workers bottleneck: resolved, now using 4 workers
 #  - eval-mode modules: FID/SSIM evaluators are frozen by design
 #  - dataloader not resumable: mid-epoch resume restarts the epoch, which is fine
 import warnings
 
 warnings.filterwarnings("ignore", message=".*LeafSpec.*")
-warnings.filterwarnings("ignore", message=".*does not have many workers.*")
 warnings.filterwarnings("ignore", message=".*module.*in eval mode.*")
 warnings.filterwarnings("ignore", message=".*dataloader is not resumable.*")
 warnings.filterwarnings("ignore", message=".*must be in.*range.*")
@@ -161,7 +160,7 @@ config.losses.resnet_pl.weight = 0
 
 if not _is_synthetic:
     config.data.nc.data.batch_size = BATCH_SIZE
-    config.data.nc.data.num_workers = 0
+    config.data.nc.data.num_workers = 4
     config.data.nc.data.dataset.filepaths = [_nc_file]
     config.data.nc.data.dataset.lat_indices = _lat_indices
     config.data.nc.data.dataset.lon_indices = _lon_indices
@@ -282,8 +281,8 @@ if _is_synthetic:
     _synth_seed = SEED if SEED is not None else 42
     train_ds = SyntheticOceanDataset(n=_n_samples_train, seed=_synth_seed, **_synth_cfg)
     val_ds = SyntheticOceanDataset(n=_n_samples_val, seed=_synth_seed + 100, **_synth_cfg)
-    _train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
-    _val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+    _train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
+    _val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
     log.info("Synthetic train: %d samples, val: %d samples", len(train_ds), len(val_ds))
 
 log.info("─" * 50)

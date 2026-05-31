@@ -463,37 +463,64 @@ Smoothness (TV) stays outside uncertainty weighting with fixed weight.
 |------|-----------|---------|
 | `obs_l1` | 1.0 | L1 at observation points |
 | `domain_l1` | 1.0 | L1 in water domain |
-| `inverse_variance_mse` | 1.0 | MSE weighted by 1/σ² |
+| `inverse_variance` | 1.0 | L1 weighted by 1/σ² |
 | `stability` | 1.0 | ReLU(-∂ρ(T,S)/∂z) with full EOS |
 | `bbl` | 1.0 | (∂T/∂z)² + (∂S/∂z)² at seabed |
 | `geostrophic` | 1.0 | ∂ρ/∂x + ∂u/∂z anti-correlation |
+| `isopycnal` | 1.0 | ‖∇T,∇S along isopycnal‖² (W=0.2) |
 | `smoothness` | fixed | Total variation regularization |
 
 ### Hydro Training Config (`hydro_train.yaml`)
 
 ```yaml
 # Training
-epochs: 40
-batch_size: 4
-val_batch_size: 2
-lr: 2e-4
-seed: 42
+epochs: 40                        # total training epochs
+batch_size: 4                     # training micro-batch size
+val_batch_size: 2                 # validation micro-batch size
+lr: 2e-4                          # peak learning rate (OneCycleLR)
+seed: 42                          # master RNG seed
 
 # Model
-base_ch: 32       # Base channel count (reduce for small datasets)
-n_blocks: 6       # Number of residual blocks
-ratio_g: 0.5      # Fraction of channels for global (Fourier) branch
+base_ch: 32                       # base channel count (reduce for small datasets)
+n_blocks: 6                       # number of FFCResBlocks
+ratio_g: 0.5                      # fraction of channels for global (Fourier) branch
 
-# Data
-n_train: 400
-n_val: 80
-nx: 64
-nz: 64
-augment: true     # Physical augmentation
-lazy: true        # On-the-fly scene generation (infinite diversity)
+# Data — training dataset
+n_train: 400                      # training dataset length (scenes when lazy=True)
+n_val: 80                         # validation dataset length
+nx: 64                            # horizontal grid points per scene
+nz: 64                            # vertical grid points per scene
+augment: true                     # physical augmentation (flip, amplitude scale)
+lazy: true                        # on-the-fly scene generation (infinite diversity)
+n_ctd: 5                          # CTD profiles per sample (max for curriculum)
+n_cmems_x: 8                      # CMEMS sparse columns per sample
+n_cmems_z: 10                     # CMEMS depth levels per column
+noise_ctd: 0.05                   # CTD measurement noise σ
+noise_cmems: 0.10                 # CMEMS measurement noise σ
+mode_mix:                         # scene mode mixture (must sum to 1)
+  realistic: 0.1                  # climatological Baltic ranges
+  extended: 0.2                   # ×1.5 wider ranges, stronger slopes
+  stress: 0.7                     # extreme / rare physics
+n_variants: 1                     # scene variants per sample (val/OOD pre-generated)
+num_workers: 0                    # DataLoader workers (0 = main process)
+
+# Val dataset (inherits train params, separate seed)
+val_seed_offset: 100              # val seed = seed + val_seed_offset
+
+# OOD val dataset (stress-heavy, fewer CTDs)
+ood_n_ratio: 0.5                  # ood n_val = int(n_val * ood_n_ratio)
+ood_seed_offset: 200              # ood seed = seed + ood_seed_offset
+ood_n_ctd: 2                      # fewer CTD profiles (harder inpainting)
+ood_noise_ctd: 0.08               # higher CTD noise σ
+ood_noise_cmems: 0.15             # higher CMEMS noise σ
+ood_mode_mix:                     # stress-dominant mode mixture
+  realistic: 0.0
+  extended: 0.3
+  stress: 0.7
 
 # Visualization
-viz_every: 5
+viz_every: 5                      # generate plots every N epochs
+viz_n_ctd: 3                      # CTD profiles in fixed visualization sample
 ```
 
 ### Training Commands

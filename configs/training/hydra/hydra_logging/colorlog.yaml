@@ -3,7 +3,7 @@ version: 1
 formatters:
   colorlog:
     '()': 'colorlog.ColoredFormatter'
-    format: "%(cyan)s%(asctime)s%(reset)s | %(purple)sHYDRA%(reset)s | %(message)s"
+    format: "%(cyan)s%(asctime)s%(reset)s|%(purple)sHYDRA%(reset)s|%(message)s"
     datefmt: '%H:%M:%S'
 handlers:
   console:

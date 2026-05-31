@@ -1,0 +1,46 @@
+# @package _group_
+# =============================================================
+# SINGLE SOURCE OF TRUTH — Normalization ranges for Baltic CMEMS
+# =============================================================
+#
+# WARNING: These values define the [0, 1] normalization applied to every
+# sample before it enters the neural network.  The SAME values MUST be
+# used at training time, inference time, and when converting predictions
+# back to physical units.
+#
+# Changing any value after a checkpoint has been trained WILL produce
+# silently incorrect predictions because the model expects data in the
+# original [0, 1] range.
+#
+# If you need region-specific ranges (e.g. different sea basin), create
+# a NEW file (e.g. cmems_med.yaml) rather than editing this one.
+# =============================================================
+
+# Temperature — degrees Celsius
+#   Surface: ~18-20°C (summer), ~2-4°C (winter)
+#   Bottom:  ~4-6°C year-round in Baltic deeps
+thetao: [-2.0, 22.0]
+
+# Practical Salinity — PSU (PSS-78)
+#   Surface: ~6-8 PSU (Baltic proper) to ~30 PSU (near Danish straits)
+#   Bottom:  ~11-18 PSU (Baltic proper) to ~35 PSU (North Sea influence)
+so: [5.0, 35.0]
+
+# Eastward velocity — m/s
+uo: [-2.0, 2.0]
+
+# Northward velocity — m/s
+vo: [-2.0, 2.0]
+
+# Vertical velocity — m/s (typically much smaller than horizontal)
+wo: [-0.5, 0.5]
+
+# Bottom temperature — degrees Celsius
+bottomT: [-2.0, 22.0]
+
+# Bottom salinity — PSU
+sob: [5.0, 35.0]
+
+# Velocity magnitude — m/s, derived from sqrt(uo^2 + vo^2)
+# Range computed from uo/vo bounds: sqrt(max(|uo|)^2 + max(|vo|)^2)
+"|V|": [0.0, 2.5]

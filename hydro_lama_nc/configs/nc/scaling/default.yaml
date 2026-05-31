@@ -1,0 +1,37 @@
+# @package _group_
+# =============================================================
+# DEFAULT Normalization ranges — global ocean
+# =============================================================
+#
+# WARNING: These values define the [0, 1] normalization applied to every
+# sample before it enters the neural network.  The SAME values MUST be
+# used at training time, inference time, and when converting predictions
+# back to physical units.
+#
+# Changing any value after a checkpoint has been trained WILL produce
+# silently incorrect predictions because the model expects data in the
+# original [0, 1] range.
+#
+# For Baltic-specific ranges see cmems_baltic.yaml.
+# =============================================================
+
+# Temperature — degrees Celsius (global ocean range)
+thetao: [-3.0, 40.0]
+
+# Practical Salinity — PSU
+so: [0.0, 40.0]
+
+# Eastward velocity — m/s
+uo: [-2.0, 2.0]
+
+# Northward velocity — m/s
+vo: [-2.0, 2.0]
+
+# Vertical velocity — m/s
+wo: [-0.5, 0.5]
+
+# Bottom temperature — degrees Celsius
+bottomT: [-3.0, 40.0]
+
+# Bottom salinity — PSU
+sob: [0.0, 40.0]

@@ -31,7 +31,7 @@ def run(cfg: DictConfig, smoke: bool = True) -> dict:
     # Create DataModule and setup to get `in_channels`
     dm = NetCDFDataModule(dataset_cfg=cfg.data.dataset,
                           batch_size=int(cfg.training.get("batch_size", 1)),
-                          num_workers=int(cfg.training.get("num_workers", 0)))
+                          num_workers=int(cfg.training.get("num_workers", 4)))
     dm.setup()
 
     in_ch = int(dm.in_channels)

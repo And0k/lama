@@ -1,0 +1,24 @@
+# @package _group_
+# Coordinate system configuration for NetCDF data.
+# Supports rotated pole coordinates and horizontal regridding.
+#
+# Use when:
+#   - Data uses rotated pole coordinate system (e.g., NEMO ocean model output)
+#   - You need to regrid from curvilinear/rotated grid to regular lat/lon
+#   - Different datasets use different coordinate systems and need alignment
+
+# Regridding settings
+regrid:
+  enabled: false            # Set true to regrid input data
+  method: bilinear          # Interpolation method: "bilinear" or "nearest"
+  target_lat_size: 180      # Number of target latitude points
+  target_lon_size: 360      # Number of target longitude points
+  # Or specify exact target arrays:
+  # target_lat: [-90, -89, ..., 89, 90]
+  # target_lon: [0, 1, ..., 359]
+  variables: null           # Variables to regrid (null = all)
+
+# Coordinate detection (read-only, for reference)
+detection:
+  lat_name: null            # Override auto-detected latitude coordinate name
+  lon_name: null            # Override auto-detected longitude coordinate name

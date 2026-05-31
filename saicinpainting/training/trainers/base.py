@@ -198,7 +198,7 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
             from hydra.utils import instantiate
             ds = instantiate(nc_cfg.dataset)
             return DataLoader(ds, batch_size=nc_cfg.get('batch_size', 2),
-                              shuffle=True, num_workers=nc_cfg.get('num_workers', 0))
+                              shuffle=True, num_workers=nc_cfg.get('num_workers', 4))
         kwargs = dict(self.config.data.train)
         if self.use_ddp:
             kwargs['ddp_kwargs'] = dict(num_replicas=self.trainer.num_nodes * self.trainer.num_processes,
@@ -214,7 +214,7 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
             from hydra.utils import instantiate
             ds = instantiate(nc_cfg.dataset)
             return [DataLoader(ds, batch_size=nc_cfg.get('val_batch_size', 1),
-                               shuffle=False, num_workers=nc_cfg.get('num_workers', 0))]
+                               shuffle=False, num_workers=nc_cfg.get('num_workers', 4))]
         res = [make_default_val_dataloader(**self.config.data.val)]
 
         if self.config.data.visual_test is not None:
